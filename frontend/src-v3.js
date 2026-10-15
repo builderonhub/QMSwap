@@ -290,10 +290,33 @@ function getPage() {
   return "swap";
 }
 
-async function connectWallet(requestAccounts=true) {
-  if (!window.ethereum) throw new Error("MetaMask was not found.");
+function getInjectedWalletProvider() {
+  if (
+    window.okxwallet &&
+    typeof window.okxwallet.request === "function"
+  ) {
+    return window.okxwallet;
+  }
 
-  const accounts = await window.ethereum.request({
+  const ethereum = window.ethereum;
+
+  if (ethereum && Array.isArray(ethereum.providers)) {
+    const okxProvider = ethereum.providers.find(
+      (item) => item && item.isOKXWallet &&
+        typeof item.request === "function"
+    );
+
+    if (okxProvider) return okxProvider;
+  }
+
+  return ethereum && typeof ethereum.request === "function"
+    ? ethereum
+    : null;
+}
+async function connectWallet(requestAccounts=true) {
+  if (!getInjectedWalletProvider()) throw new Error("No compatible EVM wallet was found. Enable OKX Wallet and reload the page.");
+
+  const accounts = await getInjectedWalletProvider().request({
     method: requestAccounts ? "eth_requestAccounts" : "eth_accounts"
   });
 
@@ -302,16 +325,16 @@ async function connectWallet(requestAccounts=true) {
     return;
   }
 
-  walletProvider = new ethers.BrowserProvider(window.ethereum);
+  walletProvider = new ethers.BrowserProvider(getInjectedWalletProvider());
   let network = await walletProvider.getNetwork();
 
   if (network.chainId !== CHAIN_ID) {
     if (!requestAccounts) throw new Error("Please switch MetaMask to QMS Testnet.");
-    await window.ethereum.request({
+    await getInjectedWalletProvider().request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: CHAIN_HEX }]
     });
-    walletProvider = new ethers.BrowserProvider(window.ethereum);
+    walletProvider = new ethers.BrowserProvider(getInjectedWalletProvider());
     network = await walletProvider.getNetwork();
   }
 
@@ -1006,13 +1029,13 @@ async function init() {
     else if (page === "liquidity") renderLiquidity();
     else renderFaucet();
 
-    if (window.ethereum?.on) {
-      window.ethereum.on("accountsChanged",() => location.reload());
-      window.ethereum.on("chainChanged",() => location.reload());
+    if (getInjectedWalletProvider()?.on) {
+      getInjectedWalletProvider().on("accountsChanged",() => location.reload());
+      getInjectedWalletProvider().on("chainChanged",() => location.reload());
     }
 
-    if (window.ethereum) {
-      const accounts = await window.ethereum.request({method:"eth_accounts"});
+    if (getInjectedWalletProvider()) {
+      const accounts = await getInjectedWalletProvider().request({method:"eth_accounts"});
       if (accounts?.length) {
         try {
           await connectWallet(false);
