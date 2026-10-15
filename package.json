@@ -1,0 +1,24 @@
+{
+  "name": "qmswap",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:qms": "hardhat run scripts/deploy.js --network qmsTestnet",
+    "dev": "vite frontend --host 127.0.0.1",
+    "add-liquidity:qms": "hardhat run scripts/add-liquidity.js --network qmsTestnet",
+    "deploy:v2": "hardhat run scripts/deploy-v2.js --network qmsTestnet",
+    "switch:official-v2": "hardhat run scripts/switch-official-v2.js --network qmsTestnet"
+  },
+  "dependencies": {
+    "ethers": "^6.17.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^3.0.8",
+    "dotenv": "^16.4.7",
+    "hardhat": "^2.22.18",
+    "vite": "^6.0.7"
+  }
+}

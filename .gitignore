@@ -1,0 +1,43 @@
+﻿node_modules/
+.env
+artifacts/
+cache/
+frontend/deployments/*.json
+!frontend/deployments/.gitkeep
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Dependencies and generated build files
+node_modules/
+artifacts/
+cache/
+
+# Local backups and temporary files
+backup-*/
+*.bak
+*.bak-*
+*.bak-saveStage-*
+scripts/*results.json
+
+# Local deployment configuration may contain environment-specific data
+frontend/deployments/*.json
+!frontend/deployments/.gitkeep
+# Local frontend repair copies
+frontend/src-v2.js.backup*
+frontend/src-v2.js.before-*
+frontend/src-v2.js.repair-*
+source-language-scan.txt
+# Operational scripts: exclude from the initial public release
+scripts/add-liquidity.js
+scripts/deploy-*.js
+scripts/replace-pending-nonces.js
+scripts/switch-official-v2.js
+
+# Local source repair utilities
+repair-qmswap-english.mjs
+translate-qmswap-english.mjs
+
+/scripts/

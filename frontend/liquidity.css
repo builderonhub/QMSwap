@@ -1,0 +1,31 @@
+.liq-page { max-width: 760px; margin: 0 auto; padding: 46px 16px; }
+.liq-card { max-width: 620px; margin: 0 auto; }
+.liq-title-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.liq-section-label { font-size:13px; color:#a6a1b6; }
+.liq-panel { margin:12px 0; }
+.liq-field-head { display:flex; justify-content:space-between; gap:12px; color:#a6a1b6; font-size:12px; margin-bottom:12px; }
+.liq-amount { width:100%; min-width:0; background:transparent; color:#f8f7ff; border:0; outline:none; font-size:28px; font-weight:600; }
+.liq-amount::placeholder { color:#5d586e; }
+.liq-input-row { display:flex; align-items:center; gap:10px; }
+.liq-token { flex-shrink:0; background:#242033; border:1px solid #403852; border-radius:14px; color:#fff; padding:10px 12px; font-weight:750; }
+.liq-balance { color:#89849b; font-size:12px; margin-top:12px; display:flex; justify-content:space-between; gap:10px; }
+.liq-max { border:0; background:transparent; color:#b9a0ff; font-weight:800; }
+.liq-info { border:1px solid #ffffff12; border-radius:15px; background:#0e0d17; padding:14px; margin-top:16px; }
+.liq-row { display:flex; justify-content:space-between; gap:12px; color:#9792aa; font-size:12px; margin:9px 0; }
+.liq-row strong { color:#e6e1f4; text-align:right; overflow-wrap:anywhere; font-weight:600; }
+.liq-hint { color:#9f9aae; font-size:12px; line-height:1.6; margin-top:15px; }
+.liq-status { margin-top:14px; color:#b6b0c7; font-size:12px; line-height:1.7; overflow-wrap:anywhere; white-space:pre-wrap; }
+.liq-status.error { color:#ff9eaa; }
+.liq-status.success { color:#9de2bc; }
+.liq-tx { display:inline-block; color:#c5abff; margin-top:10px; font-size:12px; }
+.liq-check { display:flex; align-items:flex-start; gap:9px; color:#e6cf9e; font-size:12px; line-height:1.55; margin-top:12px; }
+.liq-check input { margin-top:3px; }
+.liq-card .primary { margin-top:18px; }
+.liq-nav { display:flex; align-items:center; gap:10px; }
+.liq-nav a { text-decoration:none; }
+@media(max-width:520px) {
+  .liq-page { padding:30px 12px; }
+  .liq-amount { font-size:24px; }
+  .liq-card { padding:15px; }
+  .liq-nav .network-chip { display:none; }
+}
