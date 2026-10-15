@@ -1,0 +1,92 @@
+{
+  "network": "qmsTestnet",
+  "chainId": 19480,
+  "deployer": "0xde0E761Fd75E568814af15331A4a62EC3E559e79",
+  "admin": "0xde0E761Fd75E568814af15331A4a62EC3E559e79",
+  "wqms": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+  "factory": "0x7E51ADdc876574A75D53a3fa5ccb7b6d2d9b4f6c",
+  "router": "0xEbe7a5d4eD495A5B67C4d9d887a63e6207f32FA0",
+  "feeBps": 30,
+  "tokens": {
+    "QMS": {
+      "address": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+      "symbol": "QMS",
+      "decimals": 18,
+      "displayName": "QMS",
+      "native": true
+    },
+    "USDT": {
+      "address": "0xb04d806cfA92fE57A06737f2191609A61351FeF8",
+      "symbol": "USDT",
+      "decimals": 6,
+      "displayName": "USDT",
+      "native": false
+    },
+    "USDC": {
+      "address": "0xCBcb88728179c59CDCeee389431e1DFC198854b6",
+      "symbol": "USDC",
+      "decimals": 6,
+      "displayName": "USDC",
+      "native": false
+    },
+    "ETH": {
+      "address": "0x2dd02c31E7dAF8a4565341EFa6e0E25c438B2993",
+      "symbol": "WETH",
+      "decimals": 18,
+      "displayName": "ETH",
+      "native": false
+    },
+    "BTC": {
+      "address": "0xE94a95800B289079ff5ae669A26D3b76D950E3b9",
+      "symbol": "WBTC",
+      "decimals": 8,
+      "displayName": "BTC",
+      "native": false
+    },
+    "BNB": {
+      "address": "0xEbFEb41c0096Da089A84191e6D75CB93Ef78a356",
+      "symbol": "WBNB",
+      "decimals": 18,
+      "displayName": "BNB",
+      "native": false
+    }
+  },
+  "pairs": {
+    "QMS/USDT": "0xE68f38EDaf332d4020a6d27c070281A714318926",
+    "QMS/USDC": "0xE4a3AeF925c4d2Efb42E4EF647518fD24FBe0D0F",
+    "QMS/ETH": "0x32f322a8a3D196d16D981094Ca68e6197C4811Fc",
+    "QMS/BTC": "0x044FedD0CDe0339f000C8759ee63eAd71F267F9f",
+    "QMS/BNB": "0xC393cCdA7bE8957BC05C79493F989a3e7506C77c",
+    "USDT/USDC": "0xA19c521D81443E719c746E7EDaEEb2BC9beea628",
+    "USDT/ETH": "0xe9F442221A78675553c1Ff76e7b75aC2B7E1c398",
+    "USDT/BTC": "0x0bE288299f86f3E98DD2B2400ACE600583845cb6",
+    "USDT/BNB": "0x0Ff16FCBe7A7C7aCFa03435dd7DB8E236c66961f",
+    "USDC/ETH": "0x4424BedA8d093B52F9CEA1466EE57b3Dbe66a329",
+    "USDC/BTC": "0x62A00C93e414B0Cb46410Ed5192b11b56cbb67c8",
+    "USDC/BNB": "0x5b60E08Fd3535105bc06a7Cc03f6383cD7c5a1Cf",
+    "ETH/BTC": "0x9A94bB32D7053F9Bd47080E405d3F4ddE8B45353",
+    "ETH/BNB": "0x776955DE8dD6137e73B519E5b4E99B814D06892F",
+    "BTC/BNB": "0x5d76603C047Bd2cdECB71e0FF540d7AC63F218FC"
+  },
+  "pairCount": 15,
+  "adminAllocation": "50% of each mock token's maximum supply",
+  "updatedAt": "2026-10-15T03:26:50.522Z",
+  "version": "admin-faucet-v6",
+  "seedPricesUsd": {
+    "QMS": "1.0",
+    "USDT": "1.0",
+    "USDC": "1.0",
+    "ETH": "2350.82",
+    "BTC": "80623.62",
+    "BNB": "714.2"
+  },
+  "liquidityPoolCountSeeded": 15,
+  "seedPlan": "500m total ETH/BTC/BNB across USDT and USDC pools; live market reference",
+  "adminFaucet": {
+    "USDT": "100000000000",
+    "USDC": "100000000000",
+    "ETH": "1000000",
+    "BTC": "1000000",
+    "BNB": "1000000"
+  }
+}
