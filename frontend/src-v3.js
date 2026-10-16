@@ -3,6 +3,70 @@ import { ethers } from "ethers";
 const RPC_URL = "https://rpc.testnet.qms.finance";
 const CHAIN_ID = 19480n;
 const CHAIN_HEX = "0x4c18";
+
+let qmsNetworkSetupPromise = null;
+
+async function ensureQmsNetworkConfigured() {
+  if (qmsNetworkSetupPromise) {
+    return qmsNetworkSetupPromise;
+  }
+
+  qmsNetworkSetupPromise = (async () => {
+    const wallet = getInjectedWalletProvider();
+    const expectedChain = CHAIN_HEX.toLowerCase();
+
+    const currentChain = String(
+      await wallet.request({ method: "eth_chainId" })
+    ).toLowerCase();
+
+    if (currentChain === expectedChain) return;
+
+    try {
+      await wallet.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: CHAIN_HEX }]
+      });
+    } catch (error) {
+      if (error?.code !== 4902) throw error;
+
+      await wallet.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: CHAIN_HEX,
+          chainName: "QMS Testnet",
+          nativeCurrency: { name: "QMS", symbol: "QMS", decimals: 18 },
+          rpcUrls: [RPC_URL],
+          blockExplorerUrls: [EXPLORER]
+        }]
+      });
+
+      const chainAfterAdd = String(
+        await wallet.request({ method: "eth_chainId" })
+      ).toLowerCase();
+
+      if (chainAfterAdd !== expectedChain) {
+        await wallet.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: CHAIN_HEX }]
+        });
+      }
+    }
+
+    const finalChain = String(
+      await wallet.request({ method: "eth_chainId" })
+    ).toLowerCase();
+
+    if (finalChain !== expectedChain) {
+      throw new Error("Please connect your wallet to QMS Testnet.");
+    }
+  })();
+
+  try {
+    await qmsNetworkSetupPromise;
+  } finally {
+    qmsNetworkSetupPromise = null;
+  }
+}
 const ZERO = "0x0000000000000000000000000000000000000000";
 const EXPLORER = "https://testnet.qmsscan.io";
 
@@ -384,32 +448,10 @@ async function connectWallet(requestAccounts=true) {
 
   if (network.chainId !== CHAIN_ID) {
     if (!requestAccounts) throw new Error("Please switch MetaMask to QMS Testnet.");
-    try {
-      await getInjectedWalletProvider().request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: CHAIN_HEX }]
-      });
-  } catch (switchError) {
-    if (switchError?.code === 4902) {
-      await getInjectedWalletProvider().request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: CHAIN_HEX,
-          chainName: "QMS Testnet",
-          nativeCurrency: { name: "QMS", symbol: "QMS", decimals: 18 },
-          rpcUrls: [RPC_URL],
-          blockExplorerUrls: [EXPLORER]
-        }]
-      });
 
-      await getInjectedWalletProvider().request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: CHAIN_HEX }]
-      });
-    } else {
-      throw switchError;
-    }
-  }    walletProvider = new ethers.BrowserProvider(getInjectedWalletProvider());
+    await ensureQmsNetworkConfigured();
+
+    walletProvider = new ethers.BrowserProvider(getInjectedWalletProvider());
     network = await walletProvider.getNetwork();
   }
 
