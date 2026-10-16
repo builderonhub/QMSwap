@@ -9,6 +9,52 @@ const EXPLORER = "https://testnet.qmsscan.io";
 const $ = (id) => document.getElementById(id);
 const rpc = new ethers.JsonRpcProvider(RPC_URL, 19480);
 
+const QWAP_ROUTER_ADDRESS = "0x93AFF45f28e5DF1b55f5AEFEfB807De843b12619";
+const QWAP_FACTORY_ADDRESS = "0x93AFD9aC50822F82c7C4f2Ec8Ec2463b086Fb878";
+const QWAP_WRAPPED_NATIVE_ADDRESS = "0x9AA510295aC664A3d5A3182a3eFe959DE2B12c34";
+
+const QWAP_TOKEN_ASSETS = Object.freeze({
+  QWAP_USDC: {
+    address: "0xDfF68E53a0A8275212927c12017f5aB5f1842a04",
+    symbol: "USDC",
+    decimals: 6,
+    displayName: "USDC (QWAP)"
+  },
+  QWAP_WETH: {
+    address: "0x9aff7FEe3C9C0599ca9d8F88C1f23A8dbB002325",
+    symbol: "WETH",
+    decimals: 18,
+    displayName: "WETH (QWAP Testnet)"
+  },
+  QWAP_USDT: {
+    address: "0x72577544f4134a25E7f09d0B5FF0ca05A1249EbF",
+    symbol: "USDT",
+    decimals: 6,
+    displayName: "USDT (QWAP)"
+  },
+  QWAP_WBTC: {
+    address: "0xD0d47E0BFFfdF57d79DC42B03a0aF31e608EF2c6",
+    symbol: "WBTC",
+    decimals: 8,
+    displayName: "WBTC (QWAP)"
+  },
+  QWAP_WQMS: {
+    address: "0x9AA510295aC664A3d5A3182a3eFe959DE2B12c34",
+    symbol: "WQMS",
+    decimals: 18,
+    displayName: "WQMS (QWAP)"
+  }
+});
+
+const qwapRouterAbi = [
+  "function factory() view returns (address)",
+  "function WQMS() view returns (address)",
+  "function getAmountsOut(uint256,address[]) view returns (uint256[])",
+  "function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) returns (uint256[])",
+  "function swapExactETHForTokens(uint256,address[],address,uint256) payable returns (uint256[])",
+  "function swapExactTokensForETH(uint256,uint256,address[],address,uint256) returns (uint256[])"
+];
+
 let CFG;
 let walletProvider = null;
 let signer = null;
@@ -66,15 +112,20 @@ const routerAbi = [
 
 let factoryRead;
 let routerRead;
+let qwapRouterRead;
 
 function asset(key) {
-  return CFG.tokens[key];
+  return CFG?.tokens?.[key] || QWAP_TOKEN_ASSETS[key];
 }
 
-function assetKeys() {
-  return ["QMS","USDT","USDC","ETH","BTC","BNB"].filter(k => CFG.tokens[k]);
-}
+function assetKeys(page = getPage()) {
+  const local = ["QMS","USDT","USDC","ETH","BTC","BNB"]
+    .filter(key => CFG?.tokens?.[key]);
 
+  return page === "swap"
+    ? [...local, ...Object.keys(QWAP_TOKEN_ASSETS)]
+    : local;
+}
 function tokenDecimals(key) {
   return Number(asset(key).decimals ?? 18);
 }
@@ -136,6 +187,8 @@ function shell(page,content) {
           <a href="/" data-page="swap" class="${page==="swap"?"active":""}">Swap</a>
           <a href="/liquidity.html" data-page="liquidity" class="${page==="liquidity"?"active":""}">Add Liquidity</a>
           <a href="/faucet.html" data-page="faucet" class="${page==="faucet"?"active":""}">Faucet</a>
+          <a href="/portfolio.html" data-page="portfolio" class="${page==="portfolio"?"active":""}">Portfolio</a>
+          <a href="/history.html" data-page="history" class="${page==="history"?"active":""}">History</a>
         </nav>
         <div class="top-actions">
           <span class="network-pill"><span class="dot"></span> QMS Testnet</span>
@@ -281,6 +334,7 @@ async function loadConfig() {
 
   factoryRead = new ethers.Contract(CFG.factory,factoryAbi,rpc);
   routerRead = new ethers.Contract(CFG.router,routerAbi,rpc);
+  qwapRouterRead = new ethers.Contract(QWAP_ROUTER_ADDRESS,qwapRouterAbi,rpc);
 }
 
 function getPage() {
@@ -419,20 +473,21 @@ async function ensureWallet() {
   if (network.chainId !== CHAIN_ID) throw new Error("Please switch MetaMask to QMS Testnet.");
 }
 
-async function ensureAllowance(tokenAddress, amount) {
+async function ensureAllowance(tokenAddress, amount, spender = CFG.router) {
   const token = new ethers.Contract(tokenAddress,tokenAbi,signer);
-  const allowance = BigInt(await token.allowance(account,CFG.router));
+  const allowance = BigInt(await token.allowance(account,spender));
 
   if (allowance >= amount) return;
 
-  setStatus("Confirm the approval for token trong MetaMask...");
-  const tx = await token.approve(CFG.router,amount);
+  setStatus("Confirm the token approval in MetaMask...");
+  const tx = await token.approve(spender,amount);
   setStatus("Waiting for approval: " + tx.hash);
   const receipt = await tx.wait();
 
-  if (!receipt || receipt.status !== 1) throw new Error("Token approval failed.");
+  if (!receipt || receipt.status !== 1) {
+    throw new Error("Token approval failed.");
+  }
 }
-
 function getSlippage() {
   return BigInt($("slippage")?.value || "50");
 }
@@ -476,6 +531,114 @@ async function bindSwap() {
   await updateSwapQuote();
 }
 
+function isQwapAssetKey(key) {
+  return Object.prototype.hasOwnProperty.call(QWAP_TOKEN_ASSETS,key);
+}
+
+function qwapRouteAddress(key) {
+  if (key === "QMS") return QWAP_WRAPPED_NATIVE_ADDRESS;
+  return isQwapAssetKey(key) ? QWAP_TOKEN_ASSETS[key].address : null;
+}
+
+async function findBestSwapRoute(fromKey,toKey,amountIn) {
+  if (
+    (fromKey === "QMS" && toKey === "QWAP_WQMS") ||
+    (fromKey === "QWAP_WQMS" && toKey === "QMS")
+  ) {
+    return {
+      venue: "QWAP-WRAP",
+      routerAddress: QWAP_WRAPPED_NATIVE_ADDRESS,
+      path: null,
+      amountOut: amountIn
+    };
+  }
+
+  const candidates = [];
+  const isLocalPair =
+    !isQwapAssetKey(fromKey) &&
+    !isQwapAssetKey(toKey) &&
+    CFG?.tokens?.[fromKey] &&
+    CFG?.tokens?.[toKey];
+
+  if (isLocalPair) {
+    try {
+      const amountOut = BigInt(await routerRead.quoteOut(
+        asset(fromKey).address,
+        asset(toKey).address,
+        amountIn
+      ));
+
+      if (amountOut > 0n) {
+        candidates.push({
+          venue: "QMSwap",
+          routerAddress: CFG.router,
+          path: null,
+          amountOut
+        });
+      }
+    } catch {
+      // The local QMSwap pool may not have a valid quote.
+    }
+  }
+
+  const compatibleWithQwap =
+    (fromKey === "QMS" || isQwapAssetKey(fromKey)) &&
+    (toKey === "QMS" || isQwapAssetKey(toKey));
+
+  if (compatibleWithQwap) {
+    const fromAddress = qwapRouteAddress(fromKey);
+    const toAddress = qwapRouteAddress(toKey);
+    const wrapped = QWAP_WRAPPED_NATIVE_ADDRESS.toLowerCase();
+
+    if (
+      fromAddress &&
+      toAddress &&
+      fromAddress.toLowerCase() !== toAddress.toLowerCase()
+    ) {
+      const paths = [[fromAddress,toAddress]];
+
+      if (
+        fromAddress.toLowerCase() !== wrapped &&
+        toAddress.toLowerCase() !== wrapped
+      ) {
+        paths.push([
+          fromAddress,
+          QWAP_WRAPPED_NATIVE_ADDRESS,
+          toAddress
+        ]);
+      }
+
+      for (const path of paths) {
+        try {
+          const amounts = await qwapRouterRead.getAmountsOut(amountIn,path);
+          const amountOut = BigInt(amounts[amounts.length - 1]);
+
+          if (amountOut > 0n) {
+            candidates.push({
+              venue: "QWAP",
+              routerAddress: QWAP_ROUTER_ADDRESS,
+              path,
+              amountOut
+            });
+          }
+        } catch {
+          // This QWAP path may not have enough liquidity.
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new Error("No route with available liquidity was found.");
+  }
+
+  candidates.sort((a,b) => {
+    if (a.amountOut === b.amountOut) return 0;
+    return a.amountOut > b.amountOut ? -1 : 1;
+  });
+
+  return candidates[0];
+}
 async function updateSwapQuote() {
   quoteOutRaw = 0n;
   if (!$("amountIn")) return;
@@ -501,17 +664,19 @@ async function updateSwapQuote() {
     const amountIn = parseAmount(input,fromKey);
     if (amountIn <= 0n) return;
 
-    const quote = await routerRead.quoteOut(
-      asset(fromKey).address,
-      asset(toKey).address,
-      amountIn
-    );
+    const route = await findBestSwapRoute(fromKey,toKey,amountIn);
+    quoteOutRaw = route.amountOut;
 
-    quoteOutRaw = BigInt(quote);
     $("amountOut").value = fmt(quoteOutRaw,tokenDecimals(toKey),10);
     $("minReceived").textContent =
-      fmt(minWithSlippage(quoteOutRaw),tokenDecimals(toKey),10) + " " + toKey;
-    $("poolInfo").textContent = `${fromKey}/${toKey} · 0,30%`;
+      fmt(minWithSlippage(quoteOutRaw),tokenDecimals(toKey),10) +
+      " " + (asset(toKey).symbol || toKey);
+
+    const hopInfo = route.path && route.path.length > 2
+      ? " via WQMS"
+      : "";
+
+    $("poolInfo").textContent = `Route: ${route.venue}${hopInfo}`;
   } catch (err) {
     quoteOutRaw = 0n;
     $("amountOut").value = "";
@@ -536,46 +701,109 @@ async function runSwap() {
 
     if (fromKey === toKey || amountIn <= 0n) throw new Error("Invalid amount or trading pair.");
 
-    const amountOut = BigInt(await routerRead.quoteOut(
-      asset(fromKey).address,
-      asset(toKey).address,
-      amountIn
-    ));
-
+    const bestRoute = await findBestSwapRoute(fromKey,toKey,amountIn);
+    const amountOut = bestRoute.amountOut;
     const minOut = minWithSlippage(amountOut);
     const deadline = BigInt(Math.floor(Date.now()/1000) + 1200);
-    const router = new ethers.Contract(CFG.router,routerAbi,signer);
+    quoteOutRaw = amountOut;
 
     let tx;
 
-    if (fromKey === "QMS") {
-      await router.swapExactQMSForTokens.staticCall(
-        asset(toKey).address,minOut,deadline,account,{ value:amountIn }
+    if (bestRoute.venue === "QWAP-WRAP") {
+      const wrapped = new ethers.Contract(
+        QWAP_WRAPPED_NATIVE_ADDRESS,
+        [
+          "function deposit() payable",
+          "function withdraw(uint256 amount)"
+        ],
+        signer
       );
-      setStatus("Please confirm the swap in MetaMask...");
-      tx = await router.swapExactQMSForTokens(
-        asset(toKey).address,minOut,deadline,account,{ value:amountIn }
-      );
-    } else if (toKey === "QMS") {
-      await ensureAllowance(asset(fromKey).address,amountIn);
-      await router.swapExactTokensForQMS.staticCall(
-        asset(fromKey).address,amountIn,minOut,deadline,account
-      );
-      setStatus("Please confirm the swap in MetaMask...");
-      tx = await router.swapExactTokensForQMS(
-        asset(fromKey).address,amountIn,minOut,deadline,account
-      );
-    } else {
-      await ensureAllowance(asset(fromKey).address,amountIn);
-      await router.swapExactTokensForTokens.staticCall(
-        asset(fromKey).address,asset(toKey).address,amountIn,minOut,deadline,account
-      );
-      setStatus("Please confirm the swap in MetaMask...");
-      tx = await router.swapExactTokensForTokens(
-        asset(fromKey).address,asset(toKey).address,amountIn,minOut,deadline,account
-      );
-    }
 
+      if (fromKey === "QMS" && toKey === "QWAP_WQMS") {
+        await wrapped.deposit.staticCall({ value: amountIn });
+        setStatus("Confirm wrapping QMS into WQMS in your wallet...");
+        tx = await wrapped.deposit({ value: amountIn });
+      } else if (fromKey === "QWAP_WQMS" && toKey === "QMS") {
+        await wrapped.withdraw.staticCall(amountIn);
+        setStatus("Confirm unwrapping WQMS into QMS in your wallet...");
+        tx = await wrapped.withdraw(amountIn);
+      } else {
+        throw new Error("Invalid QMS/WQMS wrapping route.");
+      }
+    } else if (bestRoute.venue === "QWAP") {
+      const qwapRouter = new ethers.Contract(
+        QWAP_ROUTER_ADDRESS,
+        qwapRouterAbi,
+        signer
+      );
+      const routePath = bestRoute.path;
+
+      if (fromKey === "QMS") {
+        await qwapRouter.swapExactETHForTokens.staticCall(
+          minOut,routePath,account,deadline,{ value:amountIn }
+        );
+        setStatus("Confirm the QWAP swap in your wallet...");
+        tx = await qwapRouter.swapExactETHForTokens(
+          minOut,routePath,account,deadline,{ value:amountIn }
+        );
+      } else if (toKey === "QMS") {
+        await ensureAllowance(
+          asset(fromKey).address,
+          amountIn,
+          QWAP_ROUTER_ADDRESS
+        );
+        await qwapRouter.swapExactTokensForETH.staticCall(
+          amountIn,minOut,routePath,account,deadline
+        );
+        setStatus("Confirm the QWAP swap in your wallet...");
+        tx = await qwapRouter.swapExactTokensForETH(
+          amountIn,minOut,routePath,account,deadline
+        );
+      } else {
+        await ensureAllowance(
+          asset(fromKey).address,
+          amountIn,
+          QWAP_ROUTER_ADDRESS
+        );
+        await qwapRouter.swapExactTokensForTokens.staticCall(
+          amountIn,minOut,routePath,account,deadline
+        );
+        setStatus("Confirm the QWAP swap in your wallet...");
+        tx = await qwapRouter.swapExactTokensForTokens(
+          amountIn,minOut,routePath,account,deadline
+        );
+      }
+    } else {
+      const router = new ethers.Contract(CFG.router,routerAbi,signer);
+
+      if (fromKey === "QMS") {
+        await router.swapExactQMSForTokens.staticCall(
+          asset(toKey).address,minOut,deadline,account,{ value:amountIn }
+        );
+        setStatus("Please confirm the swap in your wallet...");
+        tx = await router.swapExactQMSForTokens(
+          asset(toKey).address,minOut,deadline,account,{ value:amountIn }
+        );
+      } else if (toKey === "QMS") {
+        await ensureAllowance(asset(fromKey).address,amountIn);
+        await router.swapExactTokensForQMS.staticCall(
+          asset(fromKey).address,amountIn,minOut,deadline,account
+        );
+        setStatus("Please confirm the swap in your wallet...");
+        tx = await router.swapExactTokensForQMS(
+          asset(fromKey).address,amountIn,minOut,deadline,account
+        );
+      } else {
+        await ensureAllowance(asset(fromKey).address,amountIn);
+        await router.swapExactTokensForTokens.staticCall(
+          asset(fromKey).address,asset(toKey).address,amountIn,minOut,deadline,account
+        );
+        setStatus("Please confirm the swap in your wallet...");
+        tx = await router.swapExactTokensForTokens(
+          asset(fromKey).address,asset(toKey).address,amountIn,minOut,deadline,account
+        );
+      }
+    }
     setStatus("Transaction submitted: " + tx.hash + ". Waiting for confirmation...");
     const receipt = await tx.wait();
     if (!receipt || receipt.status !== 1) throw new Error("Swap failed.");

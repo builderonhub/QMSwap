@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QMSwap | Wallet Portfolio</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "ethers": "https://cdn.jsdelivr.net/npm/ethers@6/+esm"
+    }
+  }
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e14;
+      --panel: #121824;
+      --panel-alt: #171f2d;
+      --line: #273247;
+      --text: #edf2ff;
+      --muted: #8e9bb4;
+      --accent: #9878ff;
+      --green: #58d6a4;
+      --red: #ff858b;
+      --yellow: #f4c66b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+    a { color: inherit; }
+    .wrap { width: min(1320px, 100% - 40px); margin: 0 auto; }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(11,14,20,.94);
+      backdrop-filter: blur(12px);
+    }
+    .topbar {
+      min-height: 74px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    .brand { font-size: 19px; font-weight: 800; letter-spacing: -.6px; text-decoration: none; }
+    .brand-mark { color: var(--accent); }
+    nav, .top-actions, .actions, .table-tools {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex-wrap: wrap;
+    }
+    nav a, button, .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 10px 13px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-alt);
+      color: var(--text);
+      text-decoration: none;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    nav a.active { border-color: var(--accent); background: #241d3a; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #100c20; }
+    button:disabled { opacity: .55; cursor: wait; }
+    button:hover, nav a:hover, .button:hover { border-color: var(--accent); }
+    [hidden] { display: none !important; }
+    .network {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    main { padding: 36px 0 64px; }
+    .intro {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 800; letter-spacing: 1.8px; text-transform: uppercase; }
+    h1 { margin: 9px 0; font-size: clamp(29px, 4vw, 42px); letter-spacing: -1.6px; }
+    .sub { max-width: 720px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .stats { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 14px; margin-bottom: 17px; }
+    .card { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+    .label { color: var(--muted); font-size: 11px; font-weight: 700; }
+    .stat-value { margin-top: 12px; font-size: clamp(22px, 2.6vw, 31px); font-weight: 800; letter-spacing: -1px; overflow-wrap: anywhere; }
+    .stat-value.small { font-size: 28px; }
+    .stat-note { margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .status {
+      margin-bottom: 17px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .status[data-tone="error"] { color: var(--red); border-color: #66353f; }
+    .status[data-tone="warn"] { color: var(--yellow); border-color: #5c4a28; }
+    .status[data-tone="success"] { color: var(--green); border-color: #275744; }
+    .table-card { padding: 0; overflow: hidden; }
+    .table-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding: 19px;
+      border-bottom: 1px solid var(--line);
+    }
+    h2 { margin: 0; font-size: 17px; letter-spacing: -.4px; }
+    input {
+      min-width: 220px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      outline: none;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+    }
+    input:focus { border-color: var(--accent); }
+    .scroll { overflow-x: auto; }
+    table { width: 100%; min-width: 970px; border-collapse: collapse; }
+    th {
+      padding: 13px 16px;
+      background: #101621;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .8px;
+      text-align: left;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    td { padding: 15px 16px; border-top: 1px solid #202a3a; font-size: 12px; }
+    tbody tr:hover { background: rgba(152,120,255,.035); }
+    .asset-name { margin-bottom: 5px; font-size: 13px; font-weight: 800; }
+    .asset-meta { color: var(--muted); font-size: 10px; }
+    .number { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    th.number { text-align: right; }
+    .strong { font-weight: 800; }
+    .muted { color: var(--muted); }
+    .contract { color: #b6a4ff; text-decoration: none; }
+    .contract:hover { text-decoration: underline; }
+    .priced { color: var(--green); font-size: 11px; }
+    .error-text { color: var(--red); font-size: 11px; white-space: normal; }
+    .empty { padding: 40px; color: var(--muted); text-align: center; }
+    .note {
+      margin-top: 15px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(18,24,36,.55);
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.8;
+    }
+    footer { padding-top: 26px; color: var(--muted); text-align: center; font-size: 11px; }
+    @media (max-width: 1000px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stats .card:first-child { grid-column: 1 / -1; }
+    }
+    @media (max-width: 700px) {
+      .wrap { width: min(100% - 24px, 1320px); }
+      .topbar { padding: 12px 0; }
+      nav { order: 3; width: 100%; }
+      nav a { flex: 1; }
+      main { padding-top: 26px; }
+      .card { padding: 15px; }
+      .table-head { align-items: flex-start; }
+      .table-tools { width: 100%; }
+      input { min-width: 0; width: 100%; }
+      .stat-value.small { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap topbar">
+    <a class="brand" href="/"><span class="brand-mark">Q</span> QMSwap</a>
+    <nav>
+      <a href="/" data-page="swap">Swap</a>
+      <a href="/liquidity.html" data-page="liquidity">Add Liquidity</a>
+      <a href="/faucet.html" data-page="faucet">Faucet</a>
+      <a href="/portfolio.html" class="active" data-page="portfolio">Portfolio</a>
+      <a href="/history.html" data-page="history">History</a>
+    </nav>
+    <div class="top-actions">
+      <span class="network" id="networkPill"><span class="dot"></span> QMS Testnet · Chain 19480</span>
+      <button id="connectBtn" class="primary">Connect Wallet</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="intro">
+    <div>
+      <div class="eyebrow">Wallet Overview</div>
+      <h1>Portfolio</h1>
+      <div class="sub">
+        Track balances across QMSwap and QWAP on QMS Testnet. Estimated values use
+        on-chain pool quotes when available. Assets without a valid quote remain unpriced.
+      </div>
+    </div>
+    <div class="actions">
+      <span class="network" id="walletChip">Not connected</span>
+      <button id="switchBtn" hidden>Switch to QMS Testnet</button>
+      <button id="refreshBtn">Refresh</button>
+    </div>
+  </section>
+
+  <section class="stats">
+    <div class="card">
+      <div class="label">Estimated Total Value</div>
+      <div class="stat-value" id="totalValue">— USDC</div>
+      <div class="stat-note" id="totalMeta">Connect your wallet to get started.</div>
+    </div>
+    <div class="card">
+      <div class="label">Assets Held</div>
+      <div class="stat-value small" id="heldCount">—</div>
+      <div class="stat-note">Assets with a positive balance.</div>
+    </div>
+    <div class="card">
+      <div class="label">Priced Assets</div>
+      <div class="stat-value small" id="valuedCount">—</div>
+      <div class="stat-note">Assets with a successful pool quote.</div>
+    </div>
+    <div class="card">
+      <div class="label">Unpriced Assets</div>
+      <div class="stat-value small" id="unpricedCount">—</div>
+      <div class="stat-note">No valid quote or route available.</div>
+    </div>
+  </section>
+
+  <div class="status" id="status" role="status">Loading configuration...</div>
+
+  <section class="card table-card">
+    <div class="table-head">
+      <div>
+        <h2>Wallet Assets</h2>
+        <div class="stat-note"><span id="assetTotal">0</span> configured assets</div>
+      </div>
+      <div class="table-tools">
+        <input id="filterInput" type="search" placeholder="Search assets or addresses...">
+        <button id="downloadBtn">Export CSV</button>
+      </div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Asset / Contract</th>
+            <th class="number">Balance</th>
+            <th class="number">Est. Price</th>
+            <th class="number">Value</th>
+            <th class="number">Allocation</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="assetRows">
+          <tr><td colspan="6" class="empty">Connect your wallet to view assets.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="note">
+    <strong>Note:</strong> This portfolio runs on testnet. Estimated USDC values are derived
+    from on-chain quotes and are not fiat market valuations or withdrawable cash values.
+    Tokens without a valid quote are excluded from the total. QMSwap and QWAP tokens with
+    the same symbol may be different contracts.
+    <br>Last updated: <span id="updatedAt">Not updated</span>.
+  </div>
+
+  <footer>QMSwap · Wallet Portfolio · QMS Testnet</footer>
+</main>
+
+<script type="module" src="./portfolio.js?build=20261016a"></script>
+</body>
+</html>
