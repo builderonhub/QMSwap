@@ -208,35 +208,40 @@ async function ensureTestnet() {
   const network = await walletProvider.getNetwork();
   if (network.chainId === CHAIN_ID) return;
 
+  if (!injectedWallet) {
+    throw new Error("Connect your wallet first.");
+  }
+
   try {
     await injectedWallet.request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: CHAIN_HEX }]
     });
   } catch (error) {
-    if (error.code !== 4902) throw error;
+    if (error?.code !== 4902) throw error;
 
     await injectedWallet.request({
       method: "wallet_addEthereumChain",
       params: [{
         chainId: CHAIN_HEX,
         chainName: "QMS Testnet",
-        nativeCurrency: {
-          name: "QMS",
-          symbol: "QMS",
-          decimals: 18
-        },
+        nativeCurrency: { name: "QMS", symbol: "QMS", decimals: 18 },
         rpcUrls: [RPC_URL],
         blockExplorerUrls: [EXPLORER]
       }]
     });
+
+    await injectedWallet.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: CHAIN_HEX }]
+    });
   }
 
   walletProvider = new ethers.BrowserProvider(injectedWallet);
+  const switchedNetwork = await walletProvider.getNetwork();
 
-  const updatedNetwork = await walletProvider.getNetwork();
-  if (updatedNetwork.chainId !== CHAIN_ID) {
-    throw new Error("Switch your wallet to QMS Testnet to continue.");
+  if (switchedNetwork.chainId !== CHAIN_ID) {
+    throw new Error("Your wallet is not connected to QMS Testnet.");
   }
 }
 

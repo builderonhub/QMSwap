@@ -241,14 +241,18 @@ async function refreshUserBalances() {
   syncTokenLabels();
 }
 async function addOrSwitchNetwork() {
-  if (!window.ethereum) throw new Error("MetaMask or a compatible EVM wallet was not found.");
+  if (!window.ethereum) {
+    throw new Error("MetaMask or a compatible EVM wallet was not found.");
+  }
+
   try {
     await window.ethereum.request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: CFG.chainIdHex }]
     });
-  } catch (e) {
-    if (e.code !== 4902) throw e;
+  } catch (error) {
+    if (error?.code !== 4902) throw error;
+
     await window.ethereum.request({
       method: "wallet_addEthereumChain",
       params: [{
@@ -258,6 +262,11 @@ async function addOrSwitchNetwork() {
         rpcUrls: [CFG.rpc],
         blockExplorerUrls: [CFG.explorer]
       }]
+    });
+
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: CFG.chainIdHex }]
     });
   }
 }

@@ -496,35 +496,35 @@ async function switchNetwork() {
   }
 
   try {
-    await injectedWallet.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: CHAIN_ID }]
-    });
+    try {
+      await injectedWallet.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: CHAIN_ID }]
+      });
+    } catch (error) {
+      if (error?.code !== 4902) throw error;
+
+      await injectedWallet.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: CHAIN_ID,
+          chainName: "QMS Testnet",
+          nativeCurrency: { name: "QMS", symbol: "QMS", decimals: 18 },
+          rpcUrls: ["https://rpc.testnet.qms.finance"],
+          blockExplorerUrls: [EXPLORER]
+        }]
+      });
+
+      await injectedWallet.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: CHAIN_ID }]
+      });
+    }
 
     $("switchBtn").hidden = true;
-    setStatus("Wallet switched to QMS Testnet.", "success");
+    setStatus("Wallet connected to QMS Testnet.", "success");
   } catch (error) {
-    if (error.code === 4902) {
-      try {
-        await injectedWallet.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: CHAIN_ID,
-            chainName: "QMS Testnet",
-            nativeCurrency: { name: "QMS", symbol: "QMS", decimals: 18 },
-            rpcUrls: ["https://rpc.testnet.qms.finance"],
-            blockExplorerUrls: [EXPLORER]
-          }]
-        });
-
-        $("switchBtn").hidden = true;
-        setStatus("QMS Testnet was added to your wallet.", "success");
-      } catch (addError) {
-        setStatus(addError?.message || String(addError), "error");
-      }
-    } else {
-      setStatus(error?.message || String(error), "error");
-    }
+    setStatus(error?.message || String(error), "error");
   }
 }
 

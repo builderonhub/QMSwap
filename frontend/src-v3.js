@@ -384,11 +384,32 @@ async function connectWallet(requestAccounts=true) {
 
   if (network.chainId !== CHAIN_ID) {
     if (!requestAccounts) throw new Error("Please switch MetaMask to QMS Testnet.");
-    await getInjectedWalletProvider().request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: CHAIN_HEX }]
-    });
-    walletProvider = new ethers.BrowserProvider(getInjectedWalletProvider());
+    try {
+      await getInjectedWalletProvider().request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: CHAIN_HEX }]
+      });
+  } catch (switchError) {
+    if (switchError?.code === 4902) {
+      await getInjectedWalletProvider().request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: CHAIN_HEX,
+          chainName: "QMS Testnet",
+          nativeCurrency: { name: "QMS", symbol: "QMS", decimals: 18 },
+          rpcUrls: [RPC_URL],
+          blockExplorerUrls: [EXPLORER]
+        }]
+      });
+
+      await getInjectedWalletProvider().request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: CHAIN_HEX }]
+      });
+    } else {
+      throw switchError;
+    }
+  }    walletProvider = new ethers.BrowserProvider(getInjectedWalletProvider());
     network = await walletProvider.getNetwork();
   }
 
