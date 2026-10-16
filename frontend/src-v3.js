@@ -88,7 +88,7 @@ const QWAP_TOKEN_ASSETS = Object.freeze({
     address: "0x9aff7FEe3C9C0599ca9d8F88C1f23A8dbB002325",
     symbol: "WETH",
     decimals: 18,
-    displayName: "WETH (QWAP Testnet)"
+    displayName: "WETH (QWAP)"
   },
   QWAP_USDT: {
     address: "0x72577544f4134a25E7f09d0B5FF0ca05A1249EbF",

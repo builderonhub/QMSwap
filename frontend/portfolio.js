@@ -38,7 +38,7 @@ const QWAP_ASSETS = [
     address: "0x9aff7FEe3C9C0599ca9d8F88C1f23A8dbB002325",
     symbol: "WETH",
     decimals: 18,
-    displayName: "WETH (QWAP Testnet)",
+    displayName: "WETH (QWAP)",
     source: "QWAP"
   },
   {
