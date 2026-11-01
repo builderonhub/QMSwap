@@ -3,48 +3,75 @@ import { ethers } from "ethers";
 const RPC_URL = "https://rpc.testnet.qms.finance";
 const CHAIN_ID = 19480;
 const EXPLORER = "https://testnet.qmsscan.io";
-const DEPLOYMENT_URL = "/deployments/qmswap-multipair-v6.json";
-const ORDERBOOK_URL = "/deployments/qmswap-limit-order-v2.json";
+
+const ORDERBOOK_V2_URL = "/deployments/qmswap-limit-order-v2.json";
+const ORDERBOOK_V3_URL = "/deployments/qmswap-limit-order-v3.json";
 
 const PAIR_ABI = [
   "function token0() view returns (address)",
   "function token1() view returns (address)",
-  "function reserve0() view returns (uint256)",
-  "function reserve1() view returns (uint256)",
+  "function getReserves() view returns (uint112,uint112,uint32)",
   "function totalSupply() view returns (uint256)",
-  "event Swap(address indexed trader,address indexed tokenIn,uint256 amountIn,uint256 amountOut,address indexed to)"
+  "event Swap(address indexed sender,uint256 amount0In,uint256 amount1In,uint256 amount0Out,uint256 amount1Out,address indexed to)"
+];
+
+const FACTORY_ABI = [
+  "function getPair(address,address) view returns (address)"
 ];
 
 const ROUTER_ABI = [
-  "function getPair(address tokenA,address tokenB) view returns (address)",
-  "function quoteOut(address tokenIn,address tokenOut,uint256 amountIn) view returns (uint256)"
+  "function factory() view returns (address)",
+  "function WQMS() view returns (address)",
+  "function getAmountsOut(uint256,address[]) view returns (uint256[])"
 ];
 
 const ERC20_ABI = [
-  "function allowance(address owner,address spender) view returns (uint256)",
-  "function approve(address spender,uint256 amount) returns (bool)"
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)"
 ];
 
-const ORDERBOOK_ABI = [
-  "function createLimitOrder(address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,address recipient,uint256 expiry) payable returns (uint256 orderId)",
-  "function executeOrder(uint256 orderId) returns (uint256 amountOut)",
-  "function cancelOrder(uint256 orderId)",
-  "function expireOrder(uint256 orderId)",
-  "function getOrder(uint256 orderId) view returns (tuple(uint256 id,address owner,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,address recipient,uint256 expiry,uint8 status))",
+const V2_ORDERBOOK_ABI = [
+  "function router() view returns (address)",
+  "function executeOrder(uint256) returns (uint256)",
+  "function cancelOrder(uint256)",
+  "function expireOrder(uint256)",
+  "function getOrder(uint256) view returns (tuple(uint256 id,address owner,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,address recipient,uint256 expiry,uint8 status))",
   "event OrderCreated(uint256 indexed orderId,address indexed owner,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,address recipient,uint256 expiry)"
+];
+
+const V3_ORDERBOOK_ABI = [
+  "function router() view returns (address)",
+  "function createLimitOrder(address[],uint256,uint256,address,uint256) payable returns (uint256)",
+  "function executeOrder(uint256) returns (uint256)",
+  "function cancelOrder(uint256)",
+  "function expireOrder(uint256)",
+  "function getOrder(uint256) view returns (tuple(uint256 id,address owner,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,address recipient,uint256 expiry,address[] path,uint8 status))",
+  "event OrderCreated(uint256 indexed orderId,address indexed owner,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,address recipient,uint256 expiry)"
+];
+
+const LEGACY_ROUTER_ABI = [
+  "function quoteOut(address,address,uint256) view returns (uint256)"
 ];
 
 const PAIR_INTERFACE = new ethers.Interface(PAIR_ABI);
 const SWAP_TOPIC = PAIR_INTERFACE.getEvent("Swap").topicHash;
+
 const rpc = new ethers.JsonRpcProvider(RPC_URL, CHAIN_ID);
 const $ = (id) => document.getElementById(id);
 
-let appConfig = null;
+
 let tokenMap = {};
 let addressToSymbol = new Map();
+
 let pairConfig = [];
 let pairSnapshots = [];
+
 let routerRead = null;
+let factoryRead = null;
+let qwapConfig = null;
+
 let selectedQuote = "USDT";
 let currentPrices = {};
 let lastPriceChanges = {};
@@ -56,12 +83,24 @@ let selectedChartToken = "BTC";
 let marketHistoryWindow = null;
 let chartHistoryPoints = [];
 let chartResizeBound = false;
+
 let orderBookAddress = null;
 let orderBookConfig = null;
+
+let legacyOrderBookAddress = null;
+let legacyOrderBookConfig = null;
+let legacyRouterRead = null;
+
 let walletProvider = null;
 let walletSigner = null;
 let walletAccount = null;
 let marketContext = null;
+
+let marketRefreshTimer = null;
+let previewRequestId = 0;
+
+const orderTokenMetaCache = new Map();
+
 async function ensureSharedWallet() {
   // Always refresh the module references from the main QMSwap application.
   if (marketContext?.getAccount) {
@@ -152,88 +191,420 @@ function symbolForAddress(address) {
   return addressToSymbol.get(String(address).toLowerCase()) || "Unknown";
 }
 
-function findPairKey(a, b) {
-  const direct = `${a}/${b}`;
-  const reverse = `${b}/${a}`;
-  if (appConfig?.pairs?.[direct]) return direct;
-  if (appConfig?.pairs?.[reverse]) return reverse;
-  return null;
-}
+async function loadQwapMarketConfig() {
+  const config = marketContext?.getQwapConfig?.();
+  const assets = marketContext?.getAssets?.();
 
-async function loadDeployment() {
-  const response = await fetch(`${DEPLOYMENT_URL}?ts=${Date.now()}`, {
-    cache: "no-store"
-  });
-  if (!response.ok) throw new Error("Cannot load QMSwap V6 deployment configuration.");
+  if (!config || !Array.isArray(assets)) {
+    throw new Error("Market did not receive the QWAP asset registry from Swap.");
+  }
 
-  appConfig = await response.json();
+  const routerAddress = config.routerAddress;
+  const factoryAddress = config.factoryAddress;
+  const wrappedNativeAddress = config.wrappedNativeAddress;
 
-  if (Number(appConfig.chainId) !== CHAIN_ID) {
-    throw new Error(`Unexpected deployment chain ID: ${appConfig.chainId}`);
+  if (
+    !ethers.isAddress(routerAddress) ||
+    !ethers.isAddress(factoryAddress) ||
+    !ethers.isAddress(wrappedNativeAddress)
+  ) {
+    throw new Error("Invalid QWAP Router, Factory or WQMS configuration.");
+  }
+
+  const network = await rpc.getNetwork();
+  if (Number(network.chainId) !== CHAIN_ID) {
+    throw new Error(`Unexpected RPC chain ID: ${network.chainId}`);
+  }
+
+  qwapConfig = {
+    routerAddress: ethers.getAddress(routerAddress),
+    factoryAddress: ethers.getAddress(factoryAddress),
+    wrappedNativeAddress: ethers.getAddress(wrappedNativeAddress)
+  };
+
+  routerRead = new ethers.Contract(
+    qwapConfig.routerAddress,
+    ROUTER_ABI,
+    rpc
+  );
+
+  factoryRead = new ethers.Contract(
+    qwapConfig.factoryAddress,
+    FACTORY_ABI,
+    rpc
+  );
+
+  const [actualFactory, actualWqms] = await Promise.all([
+    routerRead.factory(),
+    routerRead.WQMS()
+  ]);
+
+  if (
+    actualFactory.toLowerCase() !==
+    qwapConfig.factoryAddress.toLowerCase()
+  ) {
+    throw new Error("QWAP Router and Factory addresses do not match.");
+  }
+
+  if (
+    actualWqms.toLowerCase() !==
+    qwapConfig.wrappedNativeAddress.toLowerCase()
+  ) {
+    throw new Error("QWAP Router WQMS address does not match Swap configuration.");
   }
 
   tokenMap = {};
   addressToSymbol = new Map();
 
-  for (const [key, value] of Object.entries(appConfig.tokens || {})) {
-    if (!value?.address) continue;
-    const symbol = key.toUpperCase();
+  const seenAddresses = new Set();
+
+  for (const item of assets) {
+    if (!item?.address || !ethers.isAddress(item.address)) continue;
+
+    const address = ethers.getAddress(item.address);
+    const lower = address.toLowerCase();
+
+    if (seenAddresses.has(lower)) continue;
+    seenAddresses.add(lower);
+
+    let symbol = String(item.symbol || item.key || "").trim().toUpperCase();
+    if (!symbol) continue;
+
+    const decimals = Number(item.decimals ?? 18);
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+      throw new Error(`Invalid decimals for ${symbol}.`);
+    }
+
+    if (tokenMap[symbol] && tokenMap[symbol].address.toLowerCase() !== lower) {
+      symbol = `${symbol}_${address.slice(2, 6).toUpperCase()}`;
+    }
+
+    const native =
+      Boolean(item.native) ||
+      symbol === "QMS" ||
+      lower === qwapConfig.wrappedNativeAddress.toLowerCase();
+
     tokenMap[symbol] = {
       symbol,
-      address: value.address,
-      decimals: Number(value.decimals),
-      native: Boolean(value.native) || symbol === "QMS",
-      displayName: value.displayName || symbol
+      address,
+      decimals,
+      native,
+      displayName: item.displayName || symbol,
+      source: item.source || "QWAP"
     };
+
+    addressToSymbol.set(lower, symbol);
   }
 
-  if (!tokenMap.QMS && appConfig.wqms) {
+  // QMS is the native UI alias for QWAP's WQMS token.
+  if (!tokenMap.QMS) {
     tokenMap.QMS = {
       symbol: "QMS",
-      address: appConfig.wqms,
+      address: qwapConfig.wrappedNativeAddress,
       decimals: 18,
       native: true,
-      displayName: "QMS"
+      displayName: "QMS",
+      source: "QWAP"
     };
+    addressToSymbol.set(
+      qwapConfig.wrappedNativeAddress.toLowerCase(),
+      "QMS"
+    );
+  } else {
+    tokenMap.QMS.address = qwapConfig.wrappedNativeAddress;
+    tokenMap.QMS.native = true;
+    addressToSymbol.set(
+      qwapConfig.wrappedNativeAddress.toLowerCase(),
+      "QMS"
+    );
   }
 
-  for (const [symbol, meta] of Object.entries(tokenMap)) {
-    addressToSymbol.set(meta.address.toLowerCase(), symbol);
+  if (!tokenMap.USDT || !tokenMap.USDC) {
+    throw new Error("Swap registry must contain both QWAP USDT and USDC.");
   }
 
-  if (!tokenMap.QMS || !tokenMap.USDT || !tokenMap.USDC) {
-    throw new Error("Deployment token configuration is missing QMS, USDT or USDC.");
+  if (!tokenMap[selectedQuote]) {
+    selectedQuote = "USDT";
   }
 
-  pairConfig = Object.entries(appConfig.pairs || {}).map(([key, address]) => ({
-    key,
-    address
-  }));
+  console.log("QWAP Market asset registry loaded:", Object.keys(tokenMap));
+}
 
-  if (pairConfig.length !== 15) {
-    console.warn(`Expected 15 V6 pools, found ${pairConfig.length}.`);
+async function mapLimit(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= items.length) return;
+
+        try {
+          results[index] = await worker(items[index], index);
+        } catch (error) {
+          results[index] = {
+            error: error?.shortMessage || error?.message || "Request failed"
+          };
+        }
+      }
+    }
+  );
+
+  await Promise.all(workers);
+  return results;
+}
+
+async function discoverQwapPools() {
+  const assets = Object.values(tokenMap);
+  const combinations = [];
+
+  for (let i = 0; i < assets.length; i++) {
+    for (let j = i + 1; j < assets.length; j++) {
+      if (
+        assets[i].address.toLowerCase() ===
+        assets[j].address.toLowerCase()
+      ) {
+        continue;
+      }
+
+      combinations.push({
+        tokenA: assets[i],
+        tokenB: assets[j]
+      });
+    }
   }
 
-  routerRead = new ethers.Contract(appConfig.router, ROUTER_ABI, rpc);
+  const discovered = await mapLimit(combinations, 12, async (item) => {
+    const address = await factoryRead.getPair(
+      item.tokenA.address,
+      item.tokenB.address
+    );
+
+    if (!address || address === ethers.ZeroAddress) return null;
+
+    return {
+      key: `${item.tokenA.symbol}/${item.tokenB.symbol}`,
+      address: ethers.getAddress(address)
+    };
+  });
+
+  const unique = new Map();
+
+  for (const item of discovered) {
+    if (!item || item.error) continue;
+    unique.set(item.address.toLowerCase(), item);
+  }
+
+  pairConfig = [...unique.values()];
+
+  console.log(
+    `QWAP Market discovered ${pairConfig.length} configured-token pools.`
+  );
+}
+
+function buildCandidatePaths(
+  tokenInAddress,
+  tokenOutAddress,
+  snapshots = pairSnapshots,
+  maxPathLength = 5,
+  maxPaths = 128
+) {
+  const source = String(tokenInAddress).toLowerCase();
+  const target = String(tokenOutAddress).toLowerCase();
+
+  if (!source || !target || source === target) return [];
+
+  const graph = new Map();
+  const addressByLower = new Map();
+
+  function addEdge(from, to) {
+    const fromLower = from.toLowerCase();
+    const toLower = to.toLowerCase();
+
+    if (!graph.has(fromLower)) graph.set(fromLower, []);
+    graph.get(fromLower).push(to);
+
+    addressByLower.set(fromLower, from);
+    addressByLower.set(toLower, to);
+  }
+
+  for (const snapshot of snapshots) {
+    if (
+      snapshot.error ||
+      snapshot.reserve0 <= 0n ||
+      snapshot.reserve1 <= 0n
+    ) {
+      continue;
+    }
+
+    addEdge(snapshot.token0, snapshot.token1);
+    addEdge(snapshot.token1, snapshot.token0);
+  }
+
+  const paths = [];
+
+  function walk(current, path, visited) {
+    if (paths.length >= maxPaths) return;
+    if (path.length >= maxPathLength) return;
+
+    const neighbors = graph.get(current.toLowerCase()) || [];
+
+    for (const next of neighbors) {
+      const nextLower = next.toLowerCase();
+      if (visited.has(nextLower)) continue;
+
+      const nextPath = [...path, next];
+
+      if (nextLower === target) {
+        paths.push(nextPath);
+        if (paths.length >= maxPaths) return;
+        continue;
+      }
+
+      const nextVisited = new Set(visited);
+      nextVisited.add(nextLower);
+      walk(next, nextPath, nextVisited);
+
+      if (paths.length >= maxPaths) return;
+    }
+  }
+
+  const start = addressByLower.get(source) || ethers.getAddress(tokenInAddress);
+  const destination = addressByLower.get(target) || ethers.getAddress(tokenOutAddress);
+
+  walk(start, [start], new Set([source]));
+
+  return paths
+    .filter(path =>
+      path[path.length - 1].toLowerCase() === destination.toLowerCase()
+    )
+    .sort((a, b) => a.length - b.length);
+}
+
+async function findBestQwapRoute(
+  tokenInAddress,
+  tokenOutAddress,
+  amountIn,
+  snapshots = pairSnapshots,
+  blockTag = null
+) {
+  if (!routerRead || amountIn <= 0n) return null;
+
+  const paths = buildCandidatePaths(
+    tokenInAddress,
+    tokenOutAddress,
+    snapshots,
+    5,
+    128
+  );
+
+  if (!paths.length) return null;
+
+  const quotes = await mapLimit(paths, 4, async (path) => {
+    const amounts = blockTag === null
+      ? await routerRead.getAmountsOut(amountIn, path)
+      : await routerRead.getAmountsOut(
+          amountIn,
+          path,
+          { blockTag }
+        );
+
+    if (!amounts || amounts.length !== path.length) return null;
+
+    const amountOut = amounts[amounts.length - 1];
+    if (amountOut <= 0n) return null;
+
+    return { path, amountOut };
+  });
+
+  const valid = quotes
+    .filter(item => item && !item.error)
+    .sort((a, b) =>
+      a.amountOut === b.amountOut
+        ? a.path.length - b.path.length
+        : a.amountOut > b.amountOut ? -1 : 1
+    );
+
+  return valid[0] || null;
+}
+
+async function resolveOrderTokenMeta(address) {
+  const lower = String(address).toLowerCase();
+
+  const cached = orderTokenMetaCache.get(lower);
+  if (cached) return cached;
+
+  const knownSymbol = addressToSymbol.get(lower);
+  if (knownSymbol && tokenMap[knownSymbol]) {
+    return tokenMap[knownSymbol];
+  }
+
+  try {
+    const contract = new ethers.Contract(address, ERC20_ABI, rpc);
+    const [rawSymbol, rawDecimals] = await Promise.all([
+      contract.symbol(),
+      contract.decimals()
+    ]);
+
+    let symbol = String(rawSymbol || "Unknown").trim().toUpperCase();
+    const decimals = Number(rawDecimals);
+
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+      throw new Error("Invalid token decimals.");
+    }
+
+    if (tokenMap[symbol] &&
+        tokenMap[symbol].address.toLowerCase() !== lower) {
+      symbol = `${symbol}_${String(address).slice(2, 6).toUpperCase()}`;
+    }
+
+    const meta = {
+      symbol,
+      address: ethers.getAddress(address),
+      decimals,
+      native: false,
+      displayName: symbol,
+      source: "On-chain legacy order"
+    };
+
+    addressToSymbol.set(lower, symbol);
+    orderTokenMetaCache.set(lower, meta);
+    return meta;
+  } catch {
+    const meta = {
+      symbol: `Unknown_${String(address).slice(2, 6).toUpperCase()}`,
+      address,
+      decimals: 18,
+      native: false,
+      displayName: "Unknown"
+    };
+
+    orderTokenMetaCache.set(lower, meta);
+    return meta;
+  }
 }
 
 async function readCurrentPools() {
-  return Promise.all(pairConfig.map(async (item) => {
+  return mapLimit(pairConfig, 16, async (item) => {
     const contract = new ethers.Contract(item.address, PAIR_ABI, rpc);
+
     try {
-      const [token0, token1, reserve0, reserve1] = await Promise.all([
+      const [token0, token1, reserves, totalSupply] = await Promise.all([
         contract.token0(),
         contract.token1(),
-        contract.reserve0(),
-        contract.reserve1()
+        contract.getReserves(),
+        contract.totalSupply()
       ]);
 
       return {
         ...item,
-        token0,
-        token1,
-        reserve0,
-        reserve1,
+        token0: ethers.getAddress(token0),
+        token1: ethers.getAddress(token1),
+        reserve0: BigInt(reserves[0]),
+        reserve1: BigInt(reserves[1]),
+        totalSupply: BigInt(totalSupply),
         error: null
       };
     } catch (error) {
@@ -243,10 +614,11 @@ async function readCurrentPools() {
         token1: ethers.ZeroAddress,
         reserve0: 0n,
         reserve1: 0n,
-        error: error?.shortMessage || error?.message || "Pool read failed"
+        totalSupply: 0n,
+        error: error?.shortMessage || error?.message || "QWAP pool read failed"
       };
     }
-  }));
+  });
 }
 
 function reserveFor(snapshot, address) {
@@ -256,39 +628,64 @@ function reserveFor(snapshot, address) {
   return null;
 }
 
-function priceFromSnapshots(assetSymbol, quoteSymbol, snapshots) {
+async function priceFromSnapshots(
+  assetSymbol,
+  quoteSymbol,
+  snapshots,
+  blockTag = null
+) {
   if (assetSymbol === quoteSymbol) return 1;
 
   const asset = token(assetSymbol);
   const quote = token(quoteSymbol);
+
   if (!asset || !quote) return null;
 
-  const pairKey = findPairKey(assetSymbol, quoteSymbol);
-  if (!pairKey) return null;
+  try {
+    const amountIn = 10n ** BigInt(asset.decimals);
 
-  const snapshot = snapshots.find((p) => p.key === pairKey);
-  if (!snapshot || snapshot.error) return null;
+    const route = await findBestQwapRoute(
+      asset.address,
+      quote.address,
+      amountIn,
+      snapshots,
+      blockTag
+    );
 
-  const assetReserve = reserveFor(snapshot, asset.address);
-  const quoteReserve = reserveFor(snapshot, quote.address);
+    if (!route) return null;
 
-  if (assetReserve === null || quoteReserve === null) return null;
-  if (assetReserve <= 0n || quoteReserve <= 0n) return null;
+    const value = Number(
+      ethers.formatUnits(route.amountOut, quote.decimals)
+    );
 
-  const assetAmount = Number(ethers.formatUnits(assetReserve, asset.decimals));
-  const quoteAmount = Number(ethers.formatUnits(quoteReserve, quote.decimals));
-
-  if (!Number.isFinite(assetAmount) || assetAmount <= 0) return null;
-  const result = quoteAmount / assetAmount;
-
-  return Number.isFinite(result) && result > 0 ? result : null;
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
-function buildPriceMap(snapshots) {
+async function buildPriceMap(snapshots, blockTag = null) {
   const result = {};
-  for (const symbol of Object.keys(tokenMap)) {
-    result[symbol] = priceFromSnapshots(symbol, selectedQuote, snapshots);
+
+  const values = await mapLimit(
+    Object.keys(tokenMap),
+    3,
+    async (symbol) => ({
+      symbol,
+      price: await priceFromSnapshots(
+        symbol,
+        selectedQuote,
+        snapshots,
+        blockTag
+      )
+    })
+  );
+
+  for (const item of values) {
+    if (!item || item.error) continue;
+    result[item.symbol] = item.price;
   }
+
   result[selectedQuote] = 1;
   return result;
 }
@@ -449,15 +846,29 @@ async function findBlockAtTimestamp(targetTimestamp, latestNumber) {
 }
 
 async function readHistoricalPools(blockNumber) {
-  return Promise.all(pairSnapshots.map(async (snapshot) => {
+  return mapLimit(pairSnapshots, 12, async (snapshot) => {
     const contract = new ethers.Contract(snapshot.address, PAIR_ABI, rpc);
-    const [reserve0, reserve1] = await Promise.all([
-      contract.reserve0({ blockTag: blockNumber }),
-      contract.reserve1({ blockTag: blockNumber })
-    ]);
 
-    return { ...snapshot, reserve0, reserve1, error: null };
-  }));
+    try {
+      const reserves = await contract.getReserves({
+        blockTag: blockNumber
+      });
+
+      return {
+        ...snapshot,
+        reserve0: BigInt(reserves[0]),
+        reserve1: BigInt(reserves[1]),
+        error: null
+      };
+    } catch (error) {
+      return {
+        ...snapshot,
+        reserve0: 0n,
+        reserve1: 0n,
+        error: error?.shortMessage || error?.message || "Historical reserve read failed"
+      };
+    }
+  });
 }
 
 async function readTokenPriceHistory(
@@ -469,91 +880,105 @@ async function readTokenPriceHistory(
   const asset = token(tokenSymbol);
   const quote = token(quoteSymbol);
 
-  if (!asset || !quote || tokenSymbol === quoteSymbol) {
-    return [];
-  }
+  if (!asset || !quote || tokenSymbol === quoteSymbol) return [];
 
-  const pairAddress =
-    appConfig.pairs?.[`${tokenSymbol}/${quoteSymbol}`] ||
-    appConfig.pairs?.[`${quoteSymbol}/${tokenSymbol}`];
+  const assetAddress = asset.address.toLowerCase();
+  const quoteAddress = quote.address.toLowerCase();
 
-  if (!pairAddress) {
-    throw new Error(`No ${tokenSymbol}/${quoteSymbol} pool is configured.`);
-  }
+  const snapshot = pairSnapshots.find((item) => {
+    const a = item.token0.toLowerCase();
+    const b = item.token1.toLowerCase();
 
-  const snapshot = pairSnapshots.find(
-    (item) => item.address.toLowerCase() === pairAddress.toLowerCase()
-  );
+    return (
+      (a === assetAddress && b === quoteAddress) ||
+      (a === quoteAddress && b === assetAddress)
+    );
+  });
 
-  if (!snapshot || snapshot.error) {
-    throw new Error(`Cannot read ${tokenSymbol}/${quoteSymbol} pool.`);
-  }
+  // Multihop-priced assets can still have a current/historical reserve
+  // snapshot, but no direct pair event stream against the selected quote.
+  if (!snapshot || snapshot.error) return [];
 
   const logs = await rpc.getLogs({
-    address: pairAddress,
+    address: snapshot.address,
     topics: [SWAP_TOPIC],
     fromBlock: startBlock,
     toBlock: latestBlock
   });
 
-  const assetAddress = asset.address.toLowerCase();
-  const quoteAddress = quote.address.toLowerCase();
-
   const rawPoints = [];
 
   for (const log of logs) {
-    const parsed = PAIR_INTERFACE.parseLog({
-      topics: log.topics,
-      data: log.data
-    });
+    try {
+      const parsed = PAIR_INTERFACE.parseLog({
+        topics: log.topics,
+        data: log.data
+      });
 
-    if (!parsed) continue;
+      if (!parsed) continue;
 
-    const tokenIn = String(parsed.args.tokenIn).toLowerCase();
-    const amountIn = parsed.args.amountIn;
-    const amountOut = parsed.args.amountOut;
+      const amount0In = BigInt(parsed.args.amount0In);
+      const amount1In = BigInt(parsed.args.amount1In);
+      const amount0Out = BigInt(parsed.args.amount0Out);
+      const amount1Out = BigInt(parsed.args.amount1Out);
 
-    let assetRaw;
-    let quoteRaw;
+      let assetRaw = 0n;
+      let quoteRaw = 0n;
 
-    if (tokenIn === quoteAddress) {
-      quoteRaw = amountIn;
-      assetRaw = amountOut;
-    } else if (tokenIn === assetAddress) {
-      assetRaw = amountIn;
-      quoteRaw = amountOut;
-    } else {
-      continue;
+      const assetIs0 =
+        snapshot.token0.toLowerCase() === assetAddress;
+
+      if (assetIs0) {
+        if (amount0In > 0n) {
+          assetRaw = amount0In;
+          quoteRaw = amount1Out;
+        } else if (amount1In > 0n) {
+          assetRaw = amount0Out;
+          quoteRaw = amount1In;
+        }
+      } else {
+        if (amount1In > 0n) {
+          assetRaw = amount1In;
+          quoteRaw = amount0Out;
+        } else if (amount0In > 0n) {
+          assetRaw = amount1Out;
+          quoteRaw = amount0In;
+        }
+      }
+
+      if (assetRaw <= 0n || quoteRaw <= 0n) continue;
+
+      const assetAmount = Number(
+        ethers.formatUnits(assetRaw, asset.decimals)
+      );
+
+      const quoteAmount = Number(
+        ethers.formatUnits(quoteRaw, quote.decimals)
+      );
+
+      if (
+        !Number.isFinite(assetAmount) ||
+        !Number.isFinite(quoteAmount) ||
+        assetAmount <= 0 ||
+        quoteAmount <= 0
+      ) {
+        continue;
+      }
+
+      rawPoints.push({
+        blockNumber: Number(log.blockNumber),
+        logIndex: log.index ?? log.logIndex ?? 0,
+        price: quoteAmount / assetAmount
+      });
+    } catch (error) {
+      console.warn("Could not parse QWAP Swap event:", error);
     }
-
-    const assetAmount = Number(
-      ethers.formatUnits(assetRaw, asset.decimals)
-    );
-
-    const quoteAmount = Number(
-      ethers.formatUnits(quoteRaw, quote.decimals)
-    );
-
-    if (
-      !Number.isFinite(assetAmount) ||
-      !Number.isFinite(quoteAmount) ||
-      assetAmount <= 0 ||
-      quoteAmount <= 0
-    ) {
-      continue;
-    }
-
-    rawPoints.push({
-      blockNumber: log.blockNumber,
-      logIndex: log.index ?? log.logIndex ?? 0,
-      price: quoteAmount / assetAmount
-    });
   }
 
   if (!rawPoints.length) return [];
 
   const blockNumbers = [
-    ...new Set(rawPoints.map((point) => point.blockNumber))
+    ...new Set(rawPoints.map(point => point.blockNumber))
   ];
 
   const timestampEntries = await Promise.all(
@@ -569,12 +994,12 @@ async function readTokenPriceHistory(
   const timestamps = new Map(timestampEntries);
 
   return rawPoints
-    .map((point) => ({
+    .map(point => ({
       timestamp: timestamps.get(point.blockNumber),
       price: point.price,
       logIndex: point.logIndex
     }))
-    .filter((point) =>
+    .filter(point =>
       Number.isFinite(point.timestamp) &&
       Number.isFinite(point.price) &&
       point.price > 0
@@ -773,7 +1198,7 @@ function renderTokenChart(points, message) {
     : message || "Not enough on-chain price history is available.";
 
   $("chartFootnote").textContent =
-    message || "Price history from QMSwap V6 on-chain swaps.";
+    message || "Price history from on-chain swaps.";
 
   requestAnimationFrame(drawTokenPriceChart);
 }
@@ -863,29 +1288,44 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
   let complete = true;
   let successfulPools = 0;
 
-  const results = await Promise.all(pairSnapshots.map(async (snapshot) => {
-    try {
+  const activeSnapshots = pairSnapshots.filter(snapshot =>
+    !snapshot.error &&
+    snapshot.reserve0 > 0n &&
+    snapshot.reserve1 > 0n
+  );
+
+  // Avoid hitting the RPC with thousands of independent getLogs calls.
+  // The UI explicitly marks the result partial when this safety cap applies.
+  const MAX_VOLUME_POOLS = 250;
+  const selectedSnapshots = activeSnapshots.slice(0, MAX_VOLUME_POOLS);
+
+  if (activeSnapshots.length > selectedSnapshots.length) {
+    complete = false;
+  }
+
+  const results = await mapLimit(
+    selectedSnapshots,
+    5,
+    async (snapshot) => {
       const logs = await rpc.getLogs({
         address: snapshot.address,
         topics: [SWAP_TOPIC],
         fromBlock: startBlock,
         toBlock: latestBlock
       });
-      return { snapshot, logs, error: null };
-    } catch (error) {
-      return { snapshot, logs: [], error };
+
+      return { snapshot, logs };
     }
-  }));
+  );
 
   for (const result of results) {
-    const { snapshot, logs, error } = result;
-    const poolKey = snapshot.address.toLowerCase();
-
-    if (error) {
+    if (!result || result.error) {
       complete = false;
-      perPool[poolKey] = null;
       continue;
     }
+
+    const { snapshot, logs } = result;
+    const poolKey = snapshot.address.toLowerCase();
 
     successfulPools++;
     let poolVolume = 0;
@@ -899,30 +1339,54 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
 
         if (!parsed) continue;
 
-        const tokenInAddress = parsed.args.tokenIn;
-        const amountIn = parsed.args.amountIn;
-        const amountOut = parsed.args.amountOut;
+        const amount0In = BigInt(parsed.args.amount0In);
+        const amount1In = BigInt(parsed.args.amount1In);
+        const amount0Out = BigInt(parsed.args.amount0Out);
+        const amount1Out = BigInt(parsed.args.amount1Out);
+
+        let tokenInAddress;
+        let tokenOutAddress;
+        let amountIn;
+        let amountOut;
+
+        if (amount0In > 0n) {
+          tokenInAddress = snapshot.token0;
+          tokenOutAddress = snapshot.token1;
+          amountIn = amount0In;
+          amountOut = amount1Out;
+        } else if (amount1In > 0n) {
+          tokenInAddress = snapshot.token1;
+          tokenOutAddress = snapshot.token0;
+          amountIn = amount1In;
+          amountOut = amount0Out;
+        } else {
+          continue;
+        }
 
         const tokenInSymbol = symbolForAddress(tokenInAddress);
-        const tokenInMeta = token(tokenInSymbol);
-        const tokenOutAddress =
-          snapshot.token0.toLowerCase() === tokenInAddress.toLowerCase()
-            ? snapshot.token1
-            : snapshot.token0;
         const tokenOutSymbol = symbolForAddress(tokenOutAddress);
+
+        const tokenInMeta = token(tokenInSymbol);
         const tokenOutMeta = token(tokenOutSymbol);
 
-        if (tokenInMeta && prices[tokenInSymbol] !== null &&
-            prices[tokenInSymbol] !== undefined) {
+        if (
+          tokenInMeta &&
+          prices[tokenInSymbol] !== null &&
+          prices[tokenInSymbol] !== undefined
+        ) {
           const inputAmount = Number(
             ethers.formatUnits(amountIn, tokenInMeta.decimals)
           );
+
           const volume = inputAmount * prices[tokenInSymbol];
-          if (Number.isFinite(volume)) poolVolume += volume;
+
+          if (Number.isFinite(volume)) {
+            poolVolume += volume;
+          }
         }
 
         recent.push({
-          blockNumber: log.blockNumber,
+          blockNumber: Number(log.blockNumber),
           transactionHash: log.transactionHash,
           pool: snapshot.key,
           amountIn: tokenInMeta
@@ -933,7 +1397,7 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
             : "Unknown"
         });
       } catch (error) {
-        console.warn("Could not parse a Swap event:", error);
+        console.warn("Could not parse a QWAP Swap event:", error);
       }
     }
 
@@ -972,11 +1436,12 @@ function renderChanges(current, historical) {
 
 async function refreshMarket() {
   if (refreshing) return;
+
   refreshing = true;
   $("refreshBtn").disabled = true;
 
   try {
-    setStatus("Reading QMSwap V6 pool reserves and recent Swap events...");
+    setStatus("Updating market data...");
 
     const [network, latestBlock] = await Promise.all([
       rpc.getNetwork(),
@@ -984,11 +1449,13 @@ async function refreshMarket() {
     ]);
 
     if (Number(network.chainId) !== CHAIN_ID) {
-      throw new Error(`RPC returned chain ${network.chainId}, expected ${CHAIN_ID}.`);
+      throw new Error(
+        `RPC returned chain ${network.chainId}, expected ${CHAIN_ID}.`
+      );
     }
 
     pairSnapshots = await readCurrentPools();
-    currentPrices = buildPriceMap(pairSnapshots);
+    currentPrices = await buildPriceMap(pairSnapshots);
 
     let historicalPrices = null;
     let eventData = null;
@@ -999,7 +1466,10 @@ async function refreshMarket() {
       if (!latest) throw new Error("Cannot read latest block timestamp.");
 
       const targetTimestamp = Number(latest.timestamp) - 86400;
-      const startBlock = await findBlockAtTimestamp(targetTimestamp, latestBlock);
+      const startBlock = await findBlockAtTimestamp(
+        targetTimestamp,
+        latestBlock
+      );
 
       marketHistoryWindow = startBlock !== null
         ? {
@@ -1018,10 +1488,15 @@ async function refreshMarket() {
         ]);
 
         if (results[0].status === "fulfilled") {
-          historicalPrices = buildPriceMap(results[0].value);
-          historicalMessage = `Historical snapshot: block ${startBlock.toLocaleString("en-US")}`;
+          historicalPrices = await buildPriceMap(
+            results[0].value,
+            startBlock
+          );
+
+          historicalMessage =
+            `Historical price snapshot: block ${startBlock.toLocaleString("en-US")}`;
         } else {
-          historicalMessage = "Historical reserves unavailable from this RPC";
+          historicalMessage = "Historical QWAP reserves unavailable from this RPC";
         }
 
         if (results[1].status === "fulfilled") {
@@ -1037,22 +1512,21 @@ async function refreshMarket() {
         }
       }
     } catch (error) {
-      console.warn("24-hour data unavailable:", error);
+      console.warn("QWAP 24-hour data unavailable:", error);
+
       eventData = null;
       historicalPrices = null;
       marketHistoryWindow = null;
-      historicalMessage = "24H historical data unavailable";
+      historicalMessage = "24H QWAP historical data unavailable";
     }
 
     const changes = renderChanges(currentPrices, historicalPrices);
-
     lastPriceChanges = changes;
 
     renderTokenRows(currentPrices, changes);
     renderPoolSummary(pairSnapshots, currentPrices);
 
     await loadSelectedTokenChart();
-
 
     $("currentBlock").textContent = latestBlock.toLocaleString("en-US");
     $("historyMeta").textContent = historicalMessage;
@@ -1061,31 +1535,41 @@ async function refreshMarket() {
       ? `${numberFormat(eventData.totalVolume, 2)} ${selectedQuote}`
       : "Unavailable";
 
-    $("updatedAt").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    $("updatedAt").textContent =
+      `Updated ${new Date().toLocaleTimeString()}`;
 
-    const failedPools = pairSnapshots.filter((p) => p.error).length;
+    const failedPools = pairSnapshots.filter(p => p.error).length;
+    const activePools = pairSnapshots.filter(p =>
+      !p.error && p.reserve0 > 0n && p.reserve1 > 0n
+    ).length;
+
     const notes = [];
 
     if (failedPools) notes.push(`${failedPools} pool reads failed`);
     if (!eventData) notes.push("24H event data unavailable");
     else if (!eventData.complete) {
-      notes.push(`volume data partial (${eventData.successfulPools}/${pairSnapshots.length} pools)`);
+      notes.push(
+        `24H volume is partial (${eventData.successfulPools} pools queried)`
+      );
     }
     if (!historicalPrices) notes.push("24H price change unavailable");
 
     if (notes.length) {
       setStatus(
-        `QMSwap V6 data loaded at block ${latestBlock}. ${notes.join("; ")}.`,
+        `Market data updated at block ${latestBlock}. ${activePools} active pools. ${notes.join("; ")}.`,
         "warn"
       );
     } else {
       setStatus(
-        `All ${pairSnapshots.length} V6 pools loaded. Prices, liquidity and 24H data refreshed.`,
+        `Market data updated at block ${latestBlock}: ${activePools} active pools, prices, liquidity and 24H data.`,
         "success"
       );
     }
+
+    updateOrderPreview();
   } catch (error) {
     console.error(error);
+
     setStatus(
       `Market refresh failed: ${error?.shortMessage || error?.message || "Unknown RPC error"}`,
       "error"
@@ -1120,8 +1604,19 @@ function ceilDiv(numerator, denominator) {
 }
 
 function pairAddressExists(tokenIn, tokenOut) {
-  const pairKey = findPairKey(tokenIn, tokenOut);
-  return pairKey ? appConfig.pairs[pairKey] : null;
+  const input = token(tokenIn);
+  const output = token(tokenOut);
+  if (!input || !output) return null;
+
+  const paths = buildCandidatePaths(
+    input.address,
+    output.address,
+    pairSnapshots,
+    5,
+    1
+  );
+
+  return paths.length ? paths[0] : null;
 }
 
 function populateLimitSelectors() {
@@ -1152,18 +1647,16 @@ function refreshQuoteOptions() {
   updateOrderPreview();
 }
 
-function getOrderPreview() {
+async function getOrderPreview() {
   const baseSymbol = $("baseToken").value;
   const quoteSymbol = $("quoteToken").value;
+
   const base = token(baseSymbol);
   const quote = token(quoteSymbol);
 
   if (!base || !quote || baseSymbol === quoteSymbol) {
     throw new Error("Select two different tokens.");
   }
-
-  const pairAddress = pairAddressExists(baseSymbol, quoteSymbol);
-  if (!pairAddress) throw new Error("QMSwap pool does not exist for this pair. Trading is unavailable.");
 
   const amountText = $("orderAmount").value.trim();
   const priceText = $("limitPrice").value.trim();
@@ -1173,14 +1666,22 @@ function getOrderPreview() {
   }
 
   const priceScaled = ethers.parseUnits(priceText, 18);
-  if (priceScaled <= 0n) throw new Error("Limit price must be greater than zero.");
+  if (priceScaled <= 0n) {
+    throw new Error("Limit price must be greater than zero.");
+  }
 
   const buying = currentSide === "buy";
   const tokenIn = buying ? quote : base;
   const tokenOut = buying ? base : quote;
-  const amountIn = ethers.parseUnits(amountText, tokenIn.decimals);
 
-  if (amountIn <= 0n) throw new Error("Amount must be greater than zero.");
+  const amountIn = ethers.parseUnits(
+    amountText,
+    tokenIn.decimals
+  );
+
+  if (amountIn <= 0n) {
+    throw new Error("Amount must be greater than zero.");
+  }
 
   let minAmountOut;
 
@@ -1212,6 +1713,18 @@ function getOrderPreview() {
     throw new Error("Calculated minimum output is zero.");
   }
 
+  const route = await findBestQwapRoute(
+    tokenIn.address,
+    tokenOut.address,
+    amountIn
+  );
+
+  if (!route || !route.path?.length) {
+    throw new Error(
+      "No active QWAP route exists for this token pair. No pool will be created."
+    );
+  }
+
   return {
     base,
     quote,
@@ -1219,13 +1732,16 @@ function getOrderPreview() {
     tokenOut,
     amountIn,
     minAmountOut,
-    pairAddress,
+    path: route.path,
+    routeQuote: route.amountOut,
     priceScaled,
     buying
   };
 }
 
-function updateOrderPreview() {
+async function updateOrderPreview() {
+  const sequence = ++previewRequestId;
+
   const baseSymbol = $("baseToken").value;
   const quoteSymbol = $("quoteToken").value;
 
@@ -1233,52 +1749,135 @@ function updateOrderPreview() {
     ? `Amount to spend (${quoteSymbol})`
     : `Amount to sell (${baseSymbol})`;
 
-  $("priceLabel").textContent = `Limit price (${quoteSymbol} per ${baseSymbol})`;
+  $("priceLabel").textContent =
+    `Limit price (${quoteSymbol} per ${baseSymbol})`;
+
   $("orderDirection").textContent = currentSide === "buy"
-    ? `${quoteSymbol} → ${baseSymbol}`
-    : `${baseSymbol} → ${quoteSymbol}`;
+    ? `${quoteSymbol}  ${baseSymbol}`
+    : `${baseSymbol}  ${quoteSymbol}`;
+
+  $("placeOrderBtn").disabled = true;
 
   try {
-    const preview = getOrderPreview();
+    const preview = await getOrderPreview();
+
+    if (sequence !== previewRequestId) return;
+
     const minimum = ethers.formatUnits(
       preview.minAmountOut,
       preview.tokenOut.decimals
     );
 
+    const currentQuote = ethers.formatUnits(
+      preview.routeQuote,
+      preview.tokenOut.decimals
+    );
+
+    const routeSymbols = preview.path.map(address =>
+      symbolForAddress(address)
+    );
+
     $("minimumOutput").textContent =
       `${numberFormat(Number(minimum), 8)} ${preview.tokenOut.symbol}`;
 
-    $("executionCondition").textContent = currentSide === "buy"
-      ? `Buy only at or below ${$("limitPrice").value} ${quoteSymbol}`
-      : `Sell only at or above ${$("limitPrice").value} ${quoteSymbol}`;
+    $("executionCondition").textContent =
+      `${currentSide === "buy" ? "Buy only at or below" : "Sell only at or above"} ` +
+      `${$("limitPrice").value} ${quoteSymbol}. ` +
+      `Route: ${routeSymbols.join("  ")}. ` +
+      `Current quote: ${numberFormat(Number(currentQuote), 8)} ${preview.tokenOut.symbol}.`;
 
     $("placeOrderBtn").disabled = !orderBookAddress;
     $("placeOrderBtn").textContent = orderBookAddress
       ? "Place Limit Order"
-      : "Preview Only · Order Book Not Deployed";
+      : "Preview Only  Limit Orders Unavailable";
   } catch (error) {
-    $("minimumOutput").textContent = "—";
+    if (sequence !== previewRequestId) return;
+
+    $("minimumOutput").textContent = "";
     $("executionCondition").textContent = error.message;
+
     $("placeOrderBtn").disabled = true;
     $("placeOrderBtn").textContent = orderBookAddress
       ? "Enter Valid Order Details"
-      : "Preview Only · Order Book Not Deployed";
+      : "Preview Only  Limit Orders Unavailable";
   }
 }
 
 async function loadOrderBookDeployment() {
+  orderBookAddress = null;
+  orderBookConfig = null;
+
+  legacyOrderBookAddress = null;
+  legacyOrderBookConfig = null;
+  legacyRouterRead = null;
+
+  // V2 remains read-only configured as a legacy book.
   try {
-    const response = await fetch(`${ORDERBOOK_URL}?ts=${Date.now()}`, {
-      cache: "no-store"
-    });
+    const response = await fetch(
+      `${ORDERBOOK_V2_URL}?ts=${Date.now()}`,
+      { cache: "no-store" }
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      const address = data.address || data.orderBook || data.limitOrderBook;
+
+      if (!address || !ethers.isAddress(address)) {
+        throw new Error("V2 Order Book config has no valid address.");
+      }
+
+      if (data.chainId && Number(data.chainId) !== CHAIN_ID) {
+        throw new Error("V2 Order Book belongs to another chain.");
+      }
+
+      if (await rpc.getCode(address) === "0x") {
+        throw new Error("No V2 Order Book bytecode at configured address.");
+      }
+
+      const legacyBook = new ethers.Contract(
+        address,
+        V2_ORDERBOOK_ABI,
+        rpc
+      );
+
+      const routerAddress = await legacyBook.router();
+
+      if (
+        !ethers.isAddress(routerAddress) ||
+        await rpc.getCode(routerAddress) === "0x"
+      ) {
+        throw new Error("V2 Order Book Router is unavailable.");
+      }
+
+      legacyOrderBookAddress = ethers.getAddress(address);
+      legacyOrderBookConfig = data;
+
+      legacyRouterRead = new ethers.Contract(
+        routerAddress,
+        LEGACY_ROUTER_ABI,
+        rpc
+      );
+    }
+  } catch (error) {
+    console.warn("Legacy V2 Order Book unavailable:", error);
+    legacyOrderBookAddress = null;
+    legacyOrderBookConfig = null;
+    legacyRouterRead = null;
+  }
+
+  // New orders use only V3, whose immutable Router is QWAP.
+  try {
+    const response = await fetch(
+      `${ORDERBOOK_V3_URL}?ts=${Date.now()}`,
+      { cache: "no-store" }
+    );
 
     if (!response.ok) {
-      orderBookAddress = null;
-      orderBookConfig = null;
       setOrderStatus(
-        "Order Book contract has not been deployed/configured. You can preview limit orders, but placing orders is disabled.",
+        "Limit Order service is not configured. Market data and previews remain available; new orders are disabled.",
         "warn"
       );
+
       updateOrderPreview();
       return;
     }
@@ -1287,94 +1886,150 @@ async function loadOrderBookDeployment() {
     const address = data.address || data.orderBook || data.limitOrderBook;
 
     if (!address || !ethers.isAddress(address)) {
-      throw new Error("The Order Book deployment file has no valid contract address.");
+      throw new Error("V3 Order Book config has no valid address.");
     }
 
     if (data.chainId && Number(data.chainId) !== CHAIN_ID) {
-      throw new Error("Order Book deployment is for a different chain.");
+      throw new Error("V3 Order Book belongs to another chain.");
     }
 
-    const code = await rpc.getCode(address);
-    if (code === "0x") throw new Error("No contract bytecode found at the configured Order Book address.");
+    if (await rpc.getCode(address) === "0x") {
+      throw new Error("No V3 Order Book bytecode at configured address.");
+    }
 
-    orderBookAddress = address;
+    const book = new ethers.Contract(
+      address,
+      V3_ORDERBOOK_ABI,
+      rpc
+    );
+
+    const deployedRouter = await book.router();
+
+    if (
+      deployedRouter.toLowerCase() !==
+      qwapConfig.routerAddress.toLowerCase()
+    ) {
+      throw new Error("V3 Order Book is not connected to the configured QWAP Router.");
+    }
+
+    orderBookAddress = ethers.getAddress(address);
     orderBookConfig = data;
 
     setOrderStatus(
-      `Order Book connected: ${compactAddress(address)}. Orders are escrowed on QMS Testnet.`,
+      `QWAP V3 Order Book connected: ${compactAddress(address)}.`,
       "success"
     );
-
-    updateOrderPreview();
   } catch (error) {
     orderBookAddress = null;
     orderBookConfig = null;
-    setOrderStatus(error.message || "Order Book configuration unavailable.", "warn");
-    updateOrderPreview();
+
+    setOrderStatus(
+      error?.shortMessage || error?.message || "V3 Order Book configuration unavailable.",
+      "warn"
+    );
   }
+
+  updateOrderPreview();
 }
 
-async function ensureAllowance(tokenMeta, amount) {
-  const contract = new ethers.Contract(tokenMeta.address, ERC20_ABI, walletSigner);
-  const allowance = await contract.allowance(walletAccount, orderBookAddress);
+async function ensureAllowance(tokenMeta, amount, spender) {
+  const contract = new ethers.Contract(
+    tokenMeta.address,
+    ERC20_ABI,
+    walletSigner
+  );
+
+  const allowance = await contract.allowance(
+    walletAccount,
+    spender
+  );
 
   if (allowance >= amount) return;
 
   if (allowance > 0n) {
-    const resetTx = await contract.approve(orderBookAddress, 0n);
-    setOrderStatus("Waiting for previous token allowance reset...", "warn");
+    const resetTx = await contract.approve(spender, 0n);
+
+    setOrderStatus(
+      "Waiting for previous token allowance reset...",
+      "warn"
+    );
+
     await resetTx.wait();
   }
 
-  const approveTx = await contract.approve(orderBookAddress, amount);
-  setOrderStatus("Approve transaction submitted. Confirm the wallet transaction...", "warn");
+  const approveTx = await contract.approve(spender, amount);
+
+  setOrderStatus(
+    "Approve transaction submitted. Confirm the wallet transaction...",
+    "warn"
+  );
+
   await approveTx.wait();
 }
 
 async function placeLimitOrder() {
   if (!orderBookAddress) {
-    throw new Error("Order Book has not been deployed.");
+    throw new Error("QWAP V3 Order Book has not been deployed/configured.");
   }
 
   await ensureSharedWallet();
 
-  const preview = getOrderPreview();
-  const routerPair = await routerRead.getPair(
-    preview.tokenIn.address,
-    preview.tokenOut.address
+  const preview = await getOrderPreview();
+
+  // Recheck the selected route immediately before escrow.
+  const liveAmounts = await routerRead.getAmountsOut(
+    preview.amountIn,
+    preview.path
   );
 
-  if (routerPair === ethers.ZeroAddress) {
-    throw new Error("QMSwap pool does not exist for this pair. Trading is unavailable.");
+  if (
+    !liveAmounts ||
+    liveAmounts.length !== preview.path.length ||
+    liveAmounts[liveAmounts.length - 1] <= 0n
+  ) {
+    throw new Error("The selected QWAP route is no longer available.");
   }
+
+  const expirySeconds = Number($("orderExpiry").value);
+
+  if (!Number.isFinite(expirySeconds) || expirySeconds <= 0) {
+    throw new Error("Invalid order expiry.");
+  }
+
+  const expiry = Math.floor(Date.now() / 1000) + expirySeconds;
 
   const book = new ethers.Contract(
     orderBookAddress,
-    ORDERBOOK_ABI,
+    V3_ORDERBOOK_ABI,
     walletSigner
   );
-
-  const expirySeconds = Number($("orderExpiry").value);
-  const expiry = Math.floor(Date.now() / 1000) + expirySeconds;
 
   $("placeOrderBtn").disabled = true;
 
   try {
-    if (preview.tokenIn.address.toLowerCase() !==
-        String(appConfig.wqms).toLowerCase()) {
-      await ensureAllowance(preview.tokenIn, preview.amountIn);
+    const isNativeInput =
+      preview.tokenIn.address.toLowerCase() ===
+      qwapConfig.wrappedNativeAddress.toLowerCase();
+
+    if (!isNativeInput) {
+      await ensureAllowance(
+        preview.tokenIn,
+        preview.amountIn,
+        orderBookAddress
+      );
     }
 
-    const options = preview.tokenIn.address.toLowerCase() ===
-      String(appConfig.wqms).toLowerCase()
-        ? { value: preview.amountIn }
-        : { value: 0n };
+    const options = isNativeInput
+      ? { value: preview.amountIn }
+      : { value: 0n };
 
-    setOrderStatus("Submitting limit order. Confirm the transaction in your wallet...", "warn");
+    setOrderStatus(
+      "Submitting Limit Order. Confirm the transaction in your wallet...",
+      "warn"
+    );
 
     const tx = await book.createLimitOrder(
-      preview.tokenIn.address,
-      preview.tokenOut.address,
+      preview.path,
       preview.amountIn,
       preview.minAmountOut,
       walletAccount,
@@ -1382,10 +2037,18 @@ async function placeLimitOrder() {
       options
     );
 
-    setOrderStatus(`Order transaction submitted: ${compactAddress(tx.hash)}`, "warn");
+    setOrderStatus(
+      `V3 orderTransaction submitted: ${compactAddress(tx.hash)}`,
+      "warn"
+    );
+
     await tx.wait();
 
-    setOrderStatus("Limit order created and escrowed successfully.", "success");
+    setOrderStatus(
+      "Limit Order created. It will execute when the limit condition is met.",
+      "success"
+    );
+
     $("orderAmount").value = "";
 
     await loadMyOrders();
@@ -1515,20 +2178,10 @@ function formatOrderEntry(
 async function loadMyOrders() {
   const body = $("orderRows");
 
-  if (!orderBookAddress) {
-    body.innerHTML = `
-      <tr><td colspan="6" class="empty">
-        Order Book contract is not deployed or configured.
-      </td></tr>
-    `;
-    return;
-  }
-
-  // Never load orders belonging to other wallets.
   if (!walletAccount) {
     body.innerHTML = `
       <tr><td colspan="6" class="empty">
-        Connected QMSwap wallet not detected. Reopen Market after connecting your wallet.
+        Connected QMSwap wallet not detected.
       </td></tr>
     `;
     return;
@@ -1536,29 +2189,95 @@ async function loadMyOrders() {
 
   body.innerHTML = `
     <tr><td colspan="6" class="empty">
-      Loading your orders...
+      Loading your V2 and V3 orders...
     </td></tr>
   `;
 
   try {
-    const book = new ethers.Contract(orderBookAddress, ORDERBOOK_ABI, rpc);
+    const sources = [];
 
-    // owner is indexed in OrderCreated. RPC returns only this wallet's orders.
-    const filter = book.filters.OrderCreated(null, walletAccount);
-    const fromBlock = Number(orderBookConfig?.deploymentBlock || 0);
+    if (legacyOrderBookAddress) {
+      sources.push({
+        version: "v2",
+        address: legacyOrderBookAddress,
+        abi: V2_ORDERBOOK_ABI,
+        config: legacyOrderBookConfig
+      });
+    }
 
-    const events = await book.queryFilter(filter, fromBlock, "latest");
-    const latestEvents = events.slice(-100).reverse();
+    if (orderBookAddress) {
+      sources.push({
+        version: "v3",
+        address: orderBookAddress,
+        abi: V3_ORDERBOOK_ABI,
+        config: orderBookConfig
+      });
+    }
+
+    if (!sources.length) {
+      body.innerHTML = `
+        <tr><td colspan="6" class="empty">
+          No configured Limit Order Book contracts.
+        </td></tr>
+      `;
+      return;
+    }
+
+    const eventGroups = await Promise.all(
+      sources.map(async (source) => {
+        try {
+          const book = new ethers.Contract(
+            source.address,
+            source.abi,
+            rpc
+          );
+
+          const filter = book.filters.OrderCreated(
+            null,
+            walletAccount
+          );
+
+          const fromBlock = Number(
+            source.config?.deploymentBlock || 0
+          );
+
+          const events = await book.queryFilter(
+            filter,
+            fromBlock,
+            "latest"
+          );
+
+          return events.map(event => ({
+            source,
+            event
+          }));
+        } catch (error) {
+          console.warn(
+            `${source.version.toUpperCase()} order query failed:`,
+            error
+          );
+          return [];
+        }
+      })
+    );
+
+    const records = eventGroups
+      .flat()
+      .sort((a, b) =>
+        Number(b.event.blockNumber) - Number(a.event.blockNumber)
+      )
+      .slice(0, 100);
 
     const heading = $("ordersHeading");
     const description = $("ordersDescription");
 
     if (heading) heading.textContent = "My Orders";
     if (description) {
-      description.textContent = "Orders created by your connected wallet.";
+      description.textContent =
+        "Orders created by your connected wallet.";
     }
 
-    if (!latestEvents.length) {
+    if (!records.length) {
       body.innerHTML = `
         <tr><td colspan="6" class="empty">
           You have no limit orders yet.
@@ -1567,14 +2286,23 @@ async function loadMyOrders() {
       return;
     }
 
-    const rows = await Promise.all(latestEvents.map(async (event) => {
+    const rows = await Promise.all(records.map(async ({ source, event }) => {
       const id = event.args.orderId;
+      const book = new ethers.Contract(
+        source.address,
+        source.abi,
+        rpc
+      );
+
       const order = await book.getOrder(id);
 
-      const tokenInSymbol = symbolForAddress(order.tokenIn);
-      const tokenOutSymbol = symbolForAddress(order.tokenOut);
-      const tokenInMeta = token(tokenInSymbol);
-      const tokenOutMeta = token(tokenOutSymbol);
+      const [tokenInMeta, tokenOutMeta] = await Promise.all([
+        resolveOrderTokenMeta(order.tokenIn),
+        resolveOrderTokenMeta(order.tokenOut)
+      ]);
+
+      const tokenInSymbol = tokenInMeta.symbol;
+      const tokenOutSymbol = tokenOutMeta.symbol;
 
       const entryText = formatOrderEntry(
         order,
@@ -1587,23 +2315,46 @@ async function loadMyOrders() {
       const status = Number(order.status);
       const expired = Math.floor(Date.now() / 1000) > Number(order.expiry);
 
-      let action = `<span class="state state-off">${orderStatusLabel(status)}</span>`;
+      let action = `
+        <span class="state state-off">
+          ${esc(orderStatusLabel(status))}
+        </span>
+      `;
 
       if (status === 1 && expired) {
         action = `
-          <button class="btn" data-order-action="expire"
-            data-order-id="${id}">Refund</button>
+          <button class="btn"
+            data-order-version="${source.version}"
+            data-order-action="expire"
+            data-order-id="${id}">
+            Refund
+          </button>
         `;
       } else if (status === 1) {
         let executable = false;
 
         try {
-          const quote = await routerRead.quoteOut(
-            order.tokenIn,
-            order.tokenOut,
-            order.amountIn
-          );
-          executable = quote >= order.minAmountOut;
+          if (source.version === "v2" && legacyRouterRead) {
+            const quote = await legacyRouterRead.quoteOut(
+              order.tokenIn,
+              order.tokenOut,
+              order.amountIn
+            );
+
+            executable = quote >= order.minAmountOut;
+          } else if (source.version === "v3" && routerRead) {
+            const path = Array.from(order.path || []);
+
+            if (path.length >= 2) {
+              const amounts = await routerRead.getAmountsOut(
+                order.amountIn,
+                path
+              );
+
+              executable =
+                amounts[amounts.length - 1] >= order.minAmountOut;
+            }
+          }
         } catch {
           executable = false;
         }
@@ -1612,26 +2363,45 @@ async function loadMyOrders() {
           <div style="display:flex;gap:5px;flex-wrap:wrap">
             ${executable
               ? `<button class="btn success"
+                  data-order-version="${source.version}"
                   data-order-action="execute"
-                  data-order-id="${id}">Execute</button>`
+                  data-order-id="${id}">
+                  Execute
+                </button>`
               : '<span class="state state-warn">Waiting</span>'}
             <button class="btn danger"
+              data-order-version="${source.version}"
               data-order-action="cancel"
-              data-order-id="${id}">Cancel</button>
+              data-order-id="${id}">
+              Cancel
+            </button>
           </div>
         `;
       }
 
+      const routeText = source.version === "v3" && order.path
+        ? Array.from(order.path)
+            .map(address => symbolForAddress(address))
+            .join("  ")
+        : `${tokenInSymbol}  ${tokenOutSymbol}`;
+
       return `
         <tr>
-          <td><div class="asset-name">#${id.toString()}</div></td>
           <td>
-            ${tokenInMeta ? amountFormat(order.amountIn, tokenInMeta.decimals) : "—"}
+            <div class="asset-name">
+              #${id.toString()}  ${source.version.toUpperCase()}
+            </div>
+          </td>
+          <td>
+            ${amountFormat(order.amountIn, tokenInMeta.decimals)}
             ${esc(tokenInSymbol)}
+            <div class="muted" style="font-size:10px">
+              ${esc(routeText)}
+            </div>
           </td>
           <td>${esc(entryText)}</td>
           <td>
-            ${tokenOutMeta ? amountFormat(order.minAmountOut, tokenOutMeta.decimals) : "—"}
+            ${amountFormat(order.minAmountOut, tokenOutMeta.decimals)}
             ${esc(tokenOutSymbol)}
           </td>
           <td>${new Date(Number(order.expiry) * 1000).toLocaleString()}</td>
@@ -1652,13 +2422,26 @@ async function loadMyOrders() {
     `;
   }
 }
-async function handleOrderAction(action, id) {
+
+async function handleOrderAction(action, id, version = "v3") {
   await ensureSharedWallet();
-  if (!orderBookAddress) throw new Error("Order Book contract is unavailable.");
+
+  const isLegacy = version === "v2";
+  const address = isLegacy
+    ? legacyOrderBookAddress
+    : orderBookAddress;
+
+  const abi = isLegacy
+    ? V2_ORDERBOOK_ABI
+    : V3_ORDERBOOK_ABI;
+
+  if (!address) {
+    throw new Error(`${version.toUpperCase()} Order Book is unavailable.`);
+  }
 
   const book = new ethers.Contract(
-    orderBookAddress,
-    ORDERBOOK_ABI,
+    address,
+    abi,
     walletSigner
   );
 
@@ -1674,10 +2457,15 @@ async function handleOrderAction(action, id) {
     throw new Error("Unknown order action.");
   }
 
-  setOrderStatus(`Transaction submitted: ${compactAddress(tx.hash)}`, "warn");
+  setOrderStatus(
+    `${version.toUpperCase()}Transaction submitted: ${compactAddress(tx.hash)}`,
+    "warn"
+  );
+
   await tx.wait();
 
   setOrderStatus("Order transaction confirmed.", "success");
+
   await loadMyOrders();
   await refreshMarket();
 }
@@ -1737,7 +2525,7 @@ $("refreshOrdersBtn").addEventListener("click", async () => {
     button.disabled = true;
 
     try {
-      await handleOrderAction(action, id);
+      await handleOrderAction(action, id, button.dataset.orderVersion || "v3");
     } catch (error) {
       setOrderStatus(
         error?.shortMessage || error?.reason || error?.message || "Order action failed.",
@@ -1762,19 +2550,23 @@ export async function initMarket(context) {
   walletAccount = context?.getAccount?.() || "";
   walletSigner = context?.getSigner?.() || null;
 
-  await loadDeployment();
+  await loadQwapMarketConfig();
+  await discoverQwapPools();
 
   selectedChartToken = tokenMap.BTC
     ? "BTC"
     : (Object.keys(tokenMap)[0] || "");
 
   tokenPricePage = 0;
+  marketHistoryWindow = null;
 
   bindLimitOrderUI();
   await loadOrderBookDeployment();
 
   document.querySelectorAll("[data-quote]").forEach((button) => {
-    button.addEventListener("click", () => selectQuote(button.dataset.quote));
+    button.addEventListener("click", () => {
+      selectQuote(button.dataset.quote);
+    });
   });
 
   $("tokenRows").addEventListener("click", async (event) => {
@@ -1787,7 +2579,6 @@ export async function initMarket(context) {
     selectedChartToken = symbol;
 
     renderTokenRows(currentPrices, lastPriceChanges);
-
     await loadSelectedTokenChart();
   });
 
@@ -1813,10 +2604,13 @@ export async function initMarket(context) {
 
   $("refreshBtn").addEventListener("click", refreshMarket);
 
-  // Read only orders belonging to the wallet already connected by QMSwap.
   await loadMyOrders();
   await refreshMarket();
 
-  // Periodic market-data refresh only. Orders remain wallet-filtered.
-  setInterval(refreshMarket, 60000);
+  if (marketRefreshTimer !== null) {
+    clearInterval(marketRefreshTimer);
+  }
+
+  marketRefreshTimer = setInterval(refreshMarket, 60000);
 }
+

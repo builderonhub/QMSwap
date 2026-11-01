@@ -940,7 +940,7 @@ async function renderMarket() {
         <div class="market-stat">
           <div class="market-stat-label">Active Pools</div>
           <div class="market-stat-value" id="activePools">—</div>
-          <div class="market-stat-meta">Configured QMSwap pairs</div>
+          <div class="market-stat-meta">Active token pairs</div>
         </div>
         <div class="market-stat">
           <div class="market-stat-label">QMS Testnet Block</div>
@@ -1224,7 +1224,7 @@ async function renderMarket() {
             <div>
               <h2>Token Prices</h2>
               <div class="market-hint">
-                Spot prices from QMSwap V6 stablecoin pools.
+                Spot prices based on available market liquidity.
               </div>
             </div>
             <div class="quote-switch">
@@ -1445,7 +1445,35 @@ async function renderMarket() {
   await marketModule.initMarket({
     getAccount: () => account,
     getSigner: () => signer,
-    ensureWallet
+    ensureWallet,
+
+    getAssets: () => assetKeys("swap")
+      .filter(key => key === "QMS" || isQwapAssetKey(key))
+      .map(key => {
+        const item = asset(key);
+        if (!item) return null;
+
+        return {
+          key,
+          symbol: key === "QMS"
+            ? "QMS"
+            : String(item.symbol || key),
+          address: key === "QMS"
+            ? QWAP_WRAPPED_NATIVE_ADDRESS
+            : item.address,
+          decimals: Number(item.decimals ?? 18),
+          native: key === "QMS",
+          displayName: item.displayName || item.symbol || key,
+          source: item.source || "QWAP"
+        };
+      })
+      .filter(Boolean),
+
+    getQwapConfig: () => ({
+      routerAddress: QWAP_ROUTER_ADDRESS,
+      factoryAddress: QWAP_FACTORY_ADDRESS,
+      wrappedNativeAddress: QWAP_WRAPPED_NATIVE_ADDRESS
+    })
   });
 }
 function renderSwap() {
