@@ -12,7 +12,8 @@ const PAIR_ABI = [
   "function token1() view returns (address)",
   "function getReserves() view returns (uint112,uint112,uint32)",
   "function totalSupply() view returns (uint256)",
-  "event Swap(address indexed sender,uint256 amount0In,uint256 amount1In,uint256 amount0Out,uint256 amount1Out,address indexed to)"
+  "event Swap(address indexed sender,uint256 amount0In,uint256 amount1In,uint256 amount0Out,uint256 amount1Out,address indexed to)",
+  "event Sync(uint112 reserve0,uint112 reserve1)"
 ];
 
 const FACTORY_ABI = [
@@ -57,6 +58,7 @@ const LEGACY_ROUTER_ABI = [
 
 const PAIR_INTERFACE = new ethers.Interface(PAIR_ABI);
 const SWAP_TOPIC = PAIR_INTERFACE.getEvent("Swap").topicHash;
+const SYNC_TOPIC = PAIR_INTERFACE.getEvent("Sync").topicHash;
 
 const rpc = new ethers.JsonRpcProvider(RPC_URL, CHAIN_ID);
 const $ = (id) => document.getElementById(id);
@@ -74,6 +76,8 @@ let qwapConfig = null;
 
 let selectedQuote = "USDT";
 let currentPrices = {};
+// The current spot price and its 24H chart share this exact QWAP route.
+const marketPriceRoutes = new Map();
 let lastPriceChanges = {};
 let poolVolumes = {};
 
@@ -83,6 +87,9 @@ let selectedChartToken = "BTC";
 let marketHistoryWindow = null;
 let chartHistoryPoints = [];
 let chartResizeBound = false;
+let chartRequestId = 0;
+let volumeRefreshing = false;
+let lastVolumeRefreshAt = 0;
 
 let orderBookAddress = null;
 let orderBookConfig = null;
@@ -130,6 +137,23 @@ async function ensureSharedWallet() {
 let currentSide = "buy";
 let refreshing = false;
 
+const CORE_MARKET_SYMBOLS = ["QMS", "BTC", "ETH", "USDT"];
+const CORE_MARKET_SET = new Set(CORE_MARKET_SYMBOLS);
+
+let corePairSnapshots = [];
+let extraPairSnapshots = [];
+let extraPoolsLoading = false;
+let marketCoreLoaded = false;
+let pendingPoolRefresh = false;
+let historyRefreshing = false;
+let lastHistoryRefreshAt = 0;
+let historyLaunchTimer = null;
+let pendingHistoryBlock = 0;
+let volumeLaunchTimer = null;
+let pendingVolumeWindow = null;
+let lastExtraPoolRefreshAt = 0;
+let lastMarketBlock = 0;
+
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
@@ -140,7 +164,7 @@ function setStatus(message, tone = "") {
   const el = $("marketStatus");
   if (!el) return;
 
-  el.textContent = message;
+  el.textContent = String(message ?? "").replace(/\bQWAP\s+Router\b/gi, "market router").replace(/\bQWAP\s+route\b/gi, "selected route").replace(/\bQWAP\b/gi, "QMSwap");
   el.dataset.tone = tone;
 
   // Hide routine success messages; keep loading, warnings and errors visible.
@@ -148,11 +172,24 @@ function setStatus(message, tone = "") {
 }
 
 function setOrderStatus(message, tone = "") {
-  $("orderStatus").textContent = message;
+  $("orderStatus").textContent = String(message ?? "").replace(/\bQWAP\s+Router\b/gi, "market router").replace(/\bQWAP\s+route\b/gi, "selected route").replace(/\bQWAP\b/gi, "QMSwap");
   $("orderStatus").dataset.tone = tone;
 }
 
 function setWalletLabel() { /* Wallet connects on order actions. */ }
+
+function enforceUsdtQuoteOnly() {
+  selectedQuote = "USDT";
+
+  // Remove the USDT/USDC switch from the Market page. Keep USDC token and
+  // pool metadata available to legacy orders and background route discovery.
+  document.querySelectorAll(".quote-switch, [data-quote]").forEach((element) => {
+    element.remove();
+  });
+
+  const header = $("priceHeader");
+  if (header) header.textContent = "Price (USDT)";
+}
 
 function numberFormat(value, digits = 2) {
   if (!Number.isFinite(value)) return "Unavailable";
@@ -196,7 +233,7 @@ async function loadQwapMarketConfig() {
   const assets = marketContext?.getAssets?.();
 
   if (!config || !Array.isArray(assets)) {
-    throw new Error("Market did not receive the QWAP asset registry from Swap.");
+    throw new Error("Market data is not available from Swap.");
   }
 
   const routerAddress = config.routerAddress;
@@ -208,7 +245,7 @@ async function loadQwapMarketConfig() {
     !ethers.isAddress(factoryAddress) ||
     !ethers.isAddress(wrappedNativeAddress)
   ) {
-    throw new Error("Invalid QWAP Router, Factory or WQMS configuration.");
+    throw new Error("Invalid market configuration.");
   }
 
   const network = await rpc.getNetwork();
@@ -243,14 +280,14 @@ async function loadQwapMarketConfig() {
     actualFactory.toLowerCase() !==
     qwapConfig.factoryAddress.toLowerCase()
   ) {
-    throw new Error("QWAP Router and Factory addresses do not match.");
+    throw new Error("Market configuration does not match.");
   }
 
   if (
     actualWqms.toLowerCase() !==
     qwapConfig.wrappedNativeAddress.toLowerCase()
   ) {
-    throw new Error("QWAP Router WQMS address does not match Swap configuration.");
+    throw new Error("Market token configuration does not match Swap.");
   }
 
   tokenMap = {};
@@ -290,7 +327,10 @@ async function loadQwapMarketConfig() {
       decimals,
       native,
       displayName: item.displayName || symbol,
-      source: item.source || "QWAP"
+      source: item.source || "QWAP",
+      pools: Array.isArray(item.pools) ? item.pools : [],
+      pairAddress: item.pairAddress || null,
+      baseAddress: item.baseAddress || null
     };
 
     addressToSymbol.set(lower, symbol);
@@ -319,15 +359,15 @@ async function loadQwapMarketConfig() {
     );
   }
 
-  if (!tokenMap.USDT || !tokenMap.USDC) {
-    throw new Error("Swap registry must contain both QWAP USDT and USDC.");
+  if (!tokenMap.USDT) {
+    throw new Error("Swap registry must contain QWAP USDT.");
   }
 
   if (!tokenMap[selectedQuote]) {
     selectedQuote = "USDT";
   }
 
-  console.log("QWAP Market asset registry loaded:", Object.keys(tokenMap));
+  console.log("QMSwap Market asset registry loaded:", Object.keys(tokenMap));
 }
 
 async function mapLimit(items, concurrency, worker) {
@@ -357,50 +397,155 @@ async function mapLimit(items, concurrency, worker) {
 }
 
 async function discoverQwapPools() {
-  const assets = Object.values(tokenMap);
-  const combinations = [];
-
-  for (let i = 0; i < assets.length; i++) {
-    for (let j = i + 1; j < assets.length; j++) {
-      if (
-        assets[i].address.toLowerCase() ===
-        assets[j].address.toLowerCase()
-      ) {
-        continue;
-      }
-
-      combinations.push({
-        tokenA: assets[i],
-        tokenB: assets[j]
-      });
-    }
-  }
-
-  const discovered = await mapLimit(combinations, 12, async (item) => {
-    const address = await factoryRead.getPair(
-      item.tokenA.address,
-      item.tokenB.address
-    );
-
-    if (!address || address === ethers.ZeroAddress) return null;
-
-    return {
-      key: `${item.tokenA.symbol}/${item.tokenB.symbol}`,
-      address: ethers.getAddress(address)
-    };
-  });
-
   const unique = new Map();
 
-  for (const item of discovered) {
-    if (!item || item.error) continue;
-    unique.set(item.address.toLowerCase(), item);
+  function addPair(key, address) {
+    if (
+      !address ||
+      !ethers.isAddress(address) ||
+      address.toLowerCase() === ethers.ZeroAddress.toLowerCase()
+    ) {
+      return false;
+    }
+
+    const lower = address.toLowerCase();
+    if (unique.has(lower)) return false;
+
+    unique.set(lower, {
+      key,
+      address: ethers.getAddress(address)
+    });
+
+    return true;
+  }
+
+  // These ten pools were confirmed active on QMS Testnet.
+  // Loading them directly avoids a Factory scan before first render.
+  const coreSeeds = [
+    ["QMS/USDC", "0xc9c07DC80B9381615ef5a575c333125F711465eD"],
+    ["QMS/USDT", "0xeE027e0beEeE782e700Ca024514494b045F7278d"],
+    ["QMS/BTC",  "0xEf7773f9CeC2F034f94622A524B1Cf242C775042"],
+    ["QMS/ETH",  "0x46C41Cf1E80549c67958601a9b79d9a162FC55a2"],
+    ["USDC/USDT","0x54f221a63e9d0F23d4cF8e12436Fe58E7D807704"],
+    ["USDC/BTC", "0x0265aE868d937372f0273E1DfAf40478fc3d9b19"],
+    ["USDC/ETH", "0x3768B01813fA03A4863A44392Ed7F8F801455fc3"],
+    ["USDT/BTC", "0x380D05428aaC8C958BeE96C5fbd349D1C415d1f4"],
+    ["USDT/ETH", "0xa60f8dfd3E65A2A9E346Ed51a4863949798dEeaB"],
+    ["BTC/ETH",  "0x8308FdBD7D1487D4a46De712C2766d7a8E671360"]
+  ];
+
+  for (const [key, address] of coreSeeds) {
+    const [a, b] = key.split("/");
+    if (token(a) && token(b)) addPair(key, address);
+  }
+
+  const assets = Object.values(tokenMap);
+  const coreAddresses = new Set(
+    CORE_MARKET_SYMBOLS
+      .map(symbol => token(symbol)?.address?.toLowerCase())
+      .filter(Boolean)
+  );
+
+  // Use the exact QWAP pool addresses saved during token import.
+  for (const asset of assets) {
+    for (const pool of asset.pools || []) {
+      if (pool?.venue !== "QWAP") continue;
+      if (!ethers.isAddress(pool.pairAddress)) continue;
+
+      const baseAddress = pool.baseAddress;
+      let baseSymbol = baseAddress
+        ? symbolForAddress(baseAddress)
+        : "Unknown";
+
+      if (baseSymbol === "Unknown") {
+        baseSymbol = String(
+          pool.baseSymbol || pool.baseKey || ""
+        ).toUpperCase();
+      }
+
+      if (baseSymbol === "WQMS") baseSymbol = "QMS";
+
+      if (!baseSymbol || !token(baseSymbol)) continue;
+
+      addPair(
+        `${asset.symbol}/${baseSymbol}`,
+        pool.pairAddress
+      );
+    }
+
+    // Compatibility with a single-pair QPad token record.
+    if (asset.pairAddress) {
+      const baseAddress =
+        asset.baseAddress || qwapConfig.wrappedNativeAddress;
+
+      let baseSymbol = symbolForAddress(baseAddress);
+      if (baseSymbol === "Unknown") baseSymbol = "QMS";
+
+      if (token(baseSymbol)) {
+        addPair(
+          `${asset.symbol}/${baseSymbol}`,
+          asset.pairAddress
+        );
+      }
+    }
   }
 
   pairConfig = [...unique.values()];
 
+  // Only perform one WQMS lookup for assets with no cached pool
+  // metadata. Never scan every possible imported-token combination.
+  const fallbackAssets = assets.filter(asset => {
+    if (coreAddresses.has(asset.address.toLowerCase())) return false;
+
+    const hasCachedQwapPool =
+      (asset.pools || []).some(pool =>
+        pool?.venue === "QWAP" &&
+        ethers.isAddress(pool.pairAddress)
+      ) ||
+      Boolean(asset.pairAddress);
+
+    return !hasCachedQwapPool;
+  });
+
+  if (fallbackAssets.length) {
+    mapLimit(fallbackAssets, 8, async asset => {
+      const address = await factoryRead.getPair(
+        asset.address,
+        qwapConfig.wrappedNativeAddress
+      );
+
+      if (!address || address === ethers.ZeroAddress) return null;
+
+      return {
+        key: `${asset.symbol}/QMS`,
+        address
+      };
+    }).then(results => {
+      let changed = false;
+
+      for (const item of results) {
+        if (!item || item.error) continue;
+        if (addPair(item.key, item.address)) changed = true;
+      }
+
+      if (changed) {
+        pairConfig = [...unique.values()];
+
+        if (marketCoreLoaded) {
+          if (refreshing) {
+            pendingPoolRefresh = true;
+          } else {
+            void refreshMarket();
+          }
+        }
+      }
+    }).catch(error => {
+      console.warn("Additional pool discovery failed:", error);
+    });
+  }
+
   console.log(
-    `QWAP Market discovered ${pairConfig.length} configured-token pools.`
+    `Market initialized with ${pairConfig.length} known pools.`
   );
 }
 
@@ -488,7 +633,9 @@ async function findBestQwapRoute(
   tokenOutAddress,
   amountIn,
   snapshots = pairSnapshots,
-  blockTag = null
+  blockTag = null,
+  maxPathLength = 5,
+  maxPaths = 128
 ) {
   if (!routerRead || amountIn <= 0n) return null;
 
@@ -496,8 +643,8 @@ async function findBestQwapRoute(
     tokenInAddress,
     tokenOutAddress,
     snapshots,
-    5,
-    128
+    maxPathLength,
+    maxPaths
   );
 
   if (!paths.length) return null;
@@ -586,8 +733,8 @@ async function resolveOrderTokenMeta(address) {
   }
 }
 
-async function readCurrentPools() {
-  return mapLimit(pairConfig, 16, async (item) => {
+async function readCurrentPools(items = pairConfig) {
+  return mapLimit(items, 8, async (item) => {
     const contract = new ethers.Contract(item.address, PAIR_ABI, rpc);
 
     try {
@@ -597,6 +744,27 @@ async function readCurrentPools() {
         contract.getReserves(),
         contract.totalSupply()
       ]);
+
+      const parts = String(item.key || "").split("/");
+      if (parts.length === 2) {
+        const expectedA = token(parts[0]);
+        const expectedB = token(parts[1]);
+
+        if (expectedA && expectedB) {
+          const a = String(token0).toLowerCase();
+          const b = String(token1).toLowerCase();
+          const x = expectedA.address.toLowerCase();
+          const y = expectedB.address.toLowerCase();
+
+          const valid =
+            (a === x && b === y) ||
+            (a === y && b === x);
+
+          if (!valid) {
+            throw new Error("Pool token addresses do not match the asset pair.");
+          }
+        }
+      }
 
       return {
         ...item,
@@ -649,10 +817,21 @@ async function priceFromSnapshots(
       quote.address,
       amountIn,
       snapshots,
-      blockTag
+      blockTag,
+      4,
+      24
     );
 
-    if (!route) return null;
+    const routeKey = `${assetSymbol}->${quoteSymbol}`;
+
+    if (!route) {
+      if (blockTag === null) marketPriceRoutes.delete(routeKey);
+      return null;
+    }
+
+    if (blockTag === null) {
+      marketPriceRoutes.set(routeKey, [...route.path]);
+    }
 
     const value = Number(
       ethers.formatUnits(route.amountOut, quote.decimals)
@@ -660,15 +839,18 @@ async function priceFromSnapshots(
 
     return Number.isFinite(value) && value > 0 ? value : null;
   } catch {
+    if (blockTag === null) {
+      marketPriceRoutes.delete(`${assetSymbol}->${quoteSymbol}`);
+    }
     return null;
   }
 }
 
-async function buildPriceMap(snapshots, blockTag = null) {
+async function buildPriceMap(snapshots, blockTag = null, symbols = Object.keys(tokenMap)) {
   const result = {};
 
   const values = await mapLimit(
-    Object.keys(tokenMap),
+    symbols,
     3,
     async (symbol) => ({
       symbol,
@@ -688,6 +870,37 @@ async function buildPriceMap(snapshots, blockTag = null) {
 
   result[selectedQuote] = 1;
   return result;
+}
+
+async function getMarketPriceRoute(assetSymbol, quoteSymbol) {
+  const key = `${assetSymbol}->${quoteSymbol}`;
+  const cachedPath = marketPriceRoutes.get(key);
+
+  if (Array.isArray(cachedPath) && cachedPath.length >= 2) {
+    return { path: [...cachedPath] };
+  }
+
+  const asset = token(assetSymbol);
+  const quote = token(quoteSymbol);
+  if (!asset || !quote || !routerRead) return null;
+
+  const route = await findBestQwapRoute(
+    asset.address,
+    quote.address,
+    10n ** BigInt(asset.decimals),
+    pairSnapshots,
+    null,
+    4,
+    24
+  );
+
+  if (route?.path?.length >= 2) {
+    marketPriceRoutes.set(key, [...route.path]);
+    return route;
+  }
+
+  marketPriceRoutes.delete(key);
+  return null;
 }
 
 function pairTvl(snapshot, prices) {
@@ -714,12 +927,12 @@ function pairTvl(snapshot, prices) {
 
 function renderTokenRows(prices, changes) {
   // Every configured V6 token is listed; no hard-coded token omission.
-  const preferredOrder = ["QMS", "BTC", "ETH", "BNB", "USDT", "USDC"];
+  const preferredOrder = ["QMS", "BTC", "ETH", "BNB", "USDT"];
 
   const symbols = [
-    ...preferredOrder.filter((symbol) => token(symbol)),
+    ...preferredOrder.filter((symbol) => symbol !== "USDC" && token(symbol)),
     ...Object.keys(tokenMap)
-      .filter((symbol) => !preferredOrder.includes(symbol))
+      .filter((symbol) => symbol !== "USDC" && !preferredOrder.includes(symbol))
       .sort()
   ];
 
@@ -845,8 +1058,8 @@ async function findBlockAtTimestamp(targetTimestamp, latestNumber) {
   return answer;
 }
 
-async function readHistoricalPools(blockNumber) {
-  return mapLimit(pairSnapshots, 12, async (snapshot) => {
+async function readHistoricalPools(blockNumber, snapshots = pairSnapshots) {
+  return mapLimit(snapshots, 12, async (snapshot) => {
     const contract = new ethers.Contract(snapshot.address, PAIR_ABI, rpc);
 
     try {
@@ -860,157 +1073,139 @@ async function readHistoricalPools(blockNumber) {
         reserve1: BigInt(reserves[1]),
         error: null
       };
+
     } catch (error) {
       return {
         ...snapshot,
         reserve0: 0n,
         reserve1: 0n,
-        error: error?.shortMessage || error?.message || "Historical reserve read failed"
+        error: error?.shortMessage ||
+          error?.message ||
+          "Historical reserve read failed"
       };
     }
   });
+}
+
+function routePoolSnapshots(routePath) {
+  if (!Array.isArray(routePath) || routePath.length < 2) return [];
+
+  const used = new Set();
+  const result = [];
+
+  for (let i = 0; i < routePath.length - 1; i++) {
+    const from = String(routePath[i]).toLowerCase();
+    const to = String(routePath[i + 1]).toLowerCase();
+
+    const snapshot = pairSnapshots.find(item => {
+      if (item.error) return false;
+
+      const a = String(item.token0 || "").toLowerCase();
+      const b = String(item.token1 || "").toLowerCase();
+
+      return (a === from && b === to) || (a === to && b === from);
+    });
+
+    if (!snapshot) return [];
+
+    const key = String(snapshot.address).toLowerCase();
+    if (!used.has(key)) {
+      used.add(key);
+      result.push(snapshot);
+    }
+  }
+
+  return result;
 }
 
 async function readTokenPriceHistory(
   tokenSymbol,
   quoteSymbol,
   startBlock,
-  latestBlock
+  latestBlock,
+  routePath
 ) {
   const asset = token(tokenSymbol);
   const quote = token(quoteSymbol);
 
   if (!asset || !quote || tokenSymbol === quoteSymbol) return [];
+  if (!routerRead || !Array.isArray(routePath) || routePath.length < 2) return [];
+  if (!Number.isSafeInteger(startBlock) || !Number.isSafeInteger(latestBlock) || latestBlock <= startBlock) {
+    throw new Error("Invalid 24-hour block range for QWAP Router history.");
+  }
 
-  const assetAddress = asset.address.toLowerCase();
-  const quoteAddress = quote.address.toLowerCase();
+  // Do not make chart availability depend on Swap/Sync logs. The old chart
+  // counted a direct BTC/USDT pool, while the live price may use BTC/QMS/USDT.
+  // Sample the exact active Router route at evenly spaced historical blocks.
+  const SAMPLE_COUNT = 49; // endpoints are rendered separately: ~30-minute intervals
+  const span = latestBlock - startBlock;
+  const sampleBlocks = [];
+  const seen = new Set();
 
-  const snapshot = pairSnapshots.find((item) => {
-    const a = item.token0.toLowerCase();
-    const b = item.token1.toLowerCase();
-
-    return (
-      (a === assetAddress && b === quoteAddress) ||
-      (a === quoteAddress && b === assetAddress)
+  for (let i = 1; i < SAMPLE_COUNT - 1; i++) {
+    const blockNumber = Math.floor(
+      startBlock + (span * i) / (SAMPLE_COUNT - 1)
     );
-  });
 
-  // Multihop-priced assets can still have a current/historical reserve
-  // snapshot, but no direct pair event stream against the selected quote.
-  if (!snapshot || snapshot.error) return [];
-
-  const logs = await rpc.getLogs({
-    address: snapshot.address,
-    topics: [SWAP_TOPIC],
-    fromBlock: startBlock,
-    toBlock: latestBlock
-  });
-
-  const rawPoints = [];
-
-  for (const log of logs) {
-    try {
-      const parsed = PAIR_INTERFACE.parseLog({
-        topics: log.topics,
-        data: log.data
-      });
-
-      if (!parsed) continue;
-
-      const amount0In = BigInt(parsed.args.amount0In);
-      const amount1In = BigInt(parsed.args.amount1In);
-      const amount0Out = BigInt(parsed.args.amount0Out);
-      const amount1Out = BigInt(parsed.args.amount1Out);
-
-      let assetRaw = 0n;
-      let quoteRaw = 0n;
-
-      const assetIs0 =
-        snapshot.token0.toLowerCase() === assetAddress;
-
-      if (assetIs0) {
-        if (amount0In > 0n) {
-          assetRaw = amount0In;
-          quoteRaw = amount1Out;
-        } else if (amount1In > 0n) {
-          assetRaw = amount0Out;
-          quoteRaw = amount1In;
-        }
-      } else {
-        if (amount1In > 0n) {
-          assetRaw = amount1In;
-          quoteRaw = amount0Out;
-        } else if (amount0In > 0n) {
-          assetRaw = amount1Out;
-          quoteRaw = amount0In;
-        }
-      }
-
-      if (assetRaw <= 0n || quoteRaw <= 0n) continue;
-
-      const assetAmount = Number(
-        ethers.formatUnits(assetRaw, asset.decimals)
-      );
-
-      const quoteAmount = Number(
-        ethers.formatUnits(quoteRaw, quote.decimals)
-      );
-
-      if (
-        !Number.isFinite(assetAmount) ||
-        !Number.isFinite(quoteAmount) ||
-        assetAmount <= 0 ||
-        quoteAmount <= 0
-      ) {
-        continue;
-      }
-
-      rawPoints.push({
-        blockNumber: Number(log.blockNumber),
-        logIndex: log.index ?? log.logIndex ?? 0,
-        price: quoteAmount / assetAmount
-      });
-    } catch (error) {
-      console.warn("Could not parse QWAP Swap event:", error);
+    if (
+      blockNumber > startBlock &&
+      blockNumber < latestBlock &&
+      !seen.has(blockNumber)
+    ) {
+      seen.add(blockNumber);
+      sampleBlocks.push(blockNumber);
     }
   }
 
-  if (!rawPoints.length) return [];
+  const results = await mapLimit(sampleBlocks, 4, async blockNumber => {
+    const [amounts, block] = await Promise.all([
+      routerRead.getAmountsOut(
+        10n ** BigInt(asset.decimals),
+        routePath,
+        { blockTag: blockNumber }
+      ),
+      rpc.getBlock(blockNumber)
+    ]);
 
-  const blockNumbers = [
-    ...new Set(rawPoints.map(point => point.blockNumber))
-  ];
+    if (!amounts || amounts.length !== routePath.length || !block) return null;
 
-  const timestampEntries = await Promise.all(
-    blockNumbers.map(async (blockNumber) => {
-      const block = await rpc.getBlock(blockNumber);
-      return [
-        blockNumber,
-        block ? Number(block.timestamp) : null
-      ];
-    })
-  );
+    const output = BigInt(amounts[amounts.length - 1]);
+    if (output <= 0n) return null;
 
-  const timestamps = new Map(timestampEntries);
+    const price = Number(ethers.formatUnits(output, quote.decimals));
+    if (!Number.isFinite(price) || price <= 0) return null;
 
-  return rawPoints
-    .map(point => ({
-      timestamp: timestamps.get(point.blockNumber),
-      price: point.price,
-      logIndex: point.logIndex
-    }))
-    .filter(point =>
-      Number.isFinite(point.timestamp) &&
-      Number.isFinite(point.price) &&
-      point.price > 0
-    )
-    .sort((a, b) =>
-      a.timestamp - b.timestamp || a.logIndex - b.logIndex
+    return {
+      timestamp: Number(block.timestamp),
+      price,
+      blockNumber
+    };
+  });
+
+  const failed = results.filter(item => item?.error);
+  if (failed.length) {
+    console.warn(
+      `QWAP historical Router samples failed: ${failed.length}/${sampleBlocks.length}`,
+      failed[0].error
     );
-}
+  }
 
+  const points = results
+    .filter(item => item && !item.error)
+    .sort((a, b) => a.timestamp - b.timestamp || a.blockNumber - b.blockNumber);
+
+  if (!points.length) {
+    const firstError = failed[0]?.error;
+    throw new Error(
+      "QWAP Router could not return historical prices for the selected route" +
+      (firstError ? `: ${firstError}` : ".")
+    );
+  }
+
+  return points;
+}
 function chartPriceFormat(value) {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "\u{2014}";
   if (value >= 1000) return numberFormat(value, 2);
   if (value >= 1) return numberFormat(value, 4);
   return numberFormat(value, 8);
@@ -1198,20 +1393,52 @@ function renderTokenChart(points, message) {
     : message || "Not enough on-chain price history is available.";
 
   $("chartFootnote").textContent =
-    message || "Price history from on-chain swaps.";
+    message || "24H price history from on-chain swaps.";
 
   requestAnimationFrame(drawTokenPriceChart);
 }
 
+async function readSelectedHistoricalPrice(
+  tokenSymbol,
+  quoteSymbol,
+  startBlock,
+  routePath
+) {
+  const asset = token(tokenSymbol);
+  const quote = token(quoteSymbol);
+
+  if (!asset || !quote || tokenSymbol === quoteSymbol) return null;
+  if (!routerRead || !Array.isArray(routePath) || routePath.length < 2) return null;
+
+  const amountIn = 10n ** BigInt(asset.decimals);
+  const amounts = await routerRead.getAmountsOut(
+    amountIn,
+    routePath,
+    { blockTag: startBlock }
+  );
+
+  if (!amounts || amounts.length !== routePath.length) return null;
+
+  const output = BigInt(amounts[amounts.length - 1]);
+  if (output <= 0n) return null;
+
+  const price = Number(ethers.formatUnits(output, quote.decimals));
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
 async function loadSelectedTokenChart() {
-  const asset = token(selectedChartToken);
+  // Every new selection invalidates the previous chart request.
+  const requestId = ++chartRequestId;
+
+  const symbol = selectedChartToken;
+  const quoteSymbol = selectedQuote;
+  const asset = token(symbol);
 
   if (!asset) {
     renderTokenChart([], "Selected token is not configured.");
     return;
   }
 
-  if (selectedChartToken === selectedQuote) {
+  if (symbol === quoteSymbol) {
     renderTokenChart(
       [],
       "This is the selected quote asset. Choose another token to view its price chart."
@@ -1219,41 +1446,103 @@ async function loadSelectedTokenChart() {
     return;
   }
 
-  const points = [];
-  const historyWindow = marketHistoryWindow;
+  renderTokenChart([], `Loading ${symbol} 24H price history...`);
 
-  if (historyWindow) {
-    const historicalPrice =
-      historyWindow.historicalPrices?.[selectedChartToken];
+  try {
+    let historyWindow = marketHistoryWindow;
+
+    if (!historyWindow) {
+      const latestBlock = lastMarketBlock || await rpc.getBlockNumber();
+      const latest = await rpc.getBlock(latestBlock);
+
+      if (!latest) throw new Error("Cannot read latest block timestamp.");
+
+      const targetTimestamp = Number(latest.timestamp) - 86400;
+      const startBlock = await findBlockAtTimestamp(targetTimestamp, latestBlock);
+
+      if (
+        requestId !== chartRequestId ||
+        symbol !== selectedChartToken ||
+        quoteSymbol !== selectedQuote
+      ) return;
+
+      if (startBlock === null) {
+        renderTokenChart(
+          [],
+          "The RPC did not provide a usable 24-hour historical block range."
+        );
+        return;
+      }
+
+      historyWindow = {
+        startBlock,
+        latestBlock,
+        targetTimestamp,
+        latestTimestamp: Number(latest.timestamp),
+        historicalPrices: null
+      };
+
+      marketHistoryWindow = historyWindow;
+    }
+
+    // Use the exact same route selected for the Market spot price.
+    const marketRoute = await getMarketPriceRoute(symbol, quoteSymbol);
+
+    if (!marketRoute?.path?.length) {
+      renderTokenChart([], `No active market route is available for ${symbol}/${quoteSymbol}.`);
+      return;
+    }
+
+    const routePath = [...marketRoute.path];
+
+    const results = await Promise.allSettled([
+      readSelectedHistoricalPrice(
+        symbol,
+        quoteSymbol,
+        historyWindow.startBlock,
+        routePath
+      ),
+      readTokenPriceHistory(
+        symbol,
+        quoteSymbol,
+        historyWindow.startBlock,
+        historyWindow.latestBlock,
+        routePath
+      )
+    ]);
 
     if (
-      historicalPrice !== null &&
-      historicalPrice !== undefined &&
-      Number.isFinite(historicalPrice) &&
-      historicalPrice > 0
-    ) {
+      requestId !== chartRequestId ||
+      symbol !== selectedChartToken ||
+      quoteSymbol !== selectedQuote
+    ) return;
+
+    const historicalPrice =
+      results[0].status === "fulfilled" ? results[0].value : null;
+
+    const routePoints =
+      results[1].status === "fulfilled" ? results[1].value : [];
+
+    if (results[0].status === "rejected") {
+      console.warn("Historical market price unavailable:", results[0].reason);
+    }
+
+    if (results[1].status === "rejected") {
+      console.warn("Market price history unavailable:", results[1].reason);
+    }
+
+    const points = [];
+
+    if (Number.isFinite(historicalPrice) && historicalPrice > 0) {
       points.push({
         timestamp: historyWindow.targetTimestamp,
         price: historicalPrice
       });
     }
 
-    let tradePoints = [];
+    points.push(...routePoints);
 
-    try {
-      tradePoints = await readTokenPriceHistory(
-        selectedChartToken,
-        selectedQuote,
-        historyWindow.startBlock,
-        historyWindow.latestBlock
-      );
-    } catch (error) {
-      console.warn("Selected token 24H chart history unavailable:", error);
-    }
-
-    points.push(...tradePoints);
-
-    const currentPrice = currentPrices[selectedChartToken];
+    const currentPrice = currentPrices[symbol];
 
     if (
       currentPrice !== null &&
@@ -1267,20 +1556,27 @@ async function loadSelectedTokenChart() {
       });
     }
 
-    const message = tradePoints.length
-      ? `${tradePoints.length} on-chain swaps observed in the last 24 hours.`
-      : "No swap events found in this 24H window. The chart uses available historical and current pool reserve snapshots.";
+    points.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+
+    const routeSymbols = routePath.map(symbolForAddress);
+    const message = points.length >= 2
+      ? `24H QWAP Router history: ${points.length} price samples at approximately 30-minute intervals. Route: ${routeSymbols.join(" \u{2192} ")}.`
+      : `Insufficient historical QWAP Router quotes for route: ${routeSymbols.join(" \u{2192} ")}.`;
 
     renderTokenChart(points, message);
-    return;
+
+  } catch (error) {
+    if (requestId === chartRequestId) {
+      console.warn("Selected market chart unavailable:", error);
+
+      renderTokenChart(
+        [],
+        "24H price history unavailable: " +
+          (error?.shortMessage || error?.message || "RPC error")
+      );
+    }
   }
-
-  renderTokenChart(
-    points,
-    "The RPC did not provide a usable 24-hour historical block range."
-  );
 }
-
 async function read24HourEvents(startBlock, latestBlock, prices) {
   const perPool = {};
   const recent = [];
@@ -1288,7 +1584,7 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
   let complete = true;
   let successfulPools = 0;
 
-  const activeSnapshots = pairSnapshots.filter(snapshot =>
+  const activeSnapshots = corePairSnapshots.filter(snapshot =>
     !snapshot.error &&
     snapshot.reserve0 > 0n &&
     snapshot.reserve1 > 0n
@@ -1296,7 +1592,7 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
 
   // Avoid hitting the RPC with thousands of independent getLogs calls.
   // The UI explicitly marks the result partial when this safety cap applies.
-  const MAX_VOLUME_POOLS = 250;
+  const MAX_VOLUME_POOLS = 10;
   const selectedSnapshots = activeSnapshots.slice(0, MAX_VOLUME_POOLS);
 
   if (activeSnapshots.length > selectedSnapshots.length) {
@@ -1305,7 +1601,7 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
 
   const results = await mapLimit(
     selectedSnapshots,
-    5,
+    2,
     async (snapshot) => {
       const logs = await rpc.getLogs({
         address: snapshot.address,
@@ -1397,7 +1693,7 @@ async function read24HourEvents(startBlock, latestBlock, prices) {
             : "Unknown"
         });
       } catch (error) {
-        console.warn("Could not parse a QWAP Swap event:", error);
+        console.warn("Could not parse a market Swap event:", error);
       }
     }
 
@@ -1434,15 +1730,332 @@ function renderChanges(current, historical) {
   return changes;
 }
 
+async function refreshExtraMarketPools(items) {
+  if (!items.length || extraPoolsLoading) return;
+
+  const cacheFresh =
+    Date.now() - lastExtraPoolRefreshAt < 120000 &&
+    extraPairSnapshots.length === items.length;
+
+  if (cacheFresh) return;
+
+  extraPoolsLoading = true;
+  lastExtraPoolRefreshAt = Date.now();
+
+  try {
+    const snapshots = await readCurrentPools(items);
+
+    extraPairSnapshots = snapshots;
+    pairSnapshots = [
+      ...corePairSnapshots,
+      ...extraPairSnapshots
+    ];
+
+    const extraSymbols = Object.keys(tokenMap).filter(
+      symbol => !CORE_MARKET_SET.has(symbol)
+    );
+
+    if (extraSymbols.length) {
+      const extraPrices = await buildPriceMap(
+        pairSnapshots,
+        null,
+        extraSymbols
+      );
+
+      Object.assign(currentPrices, extraPrices);
+      if (!CORE_MARKET_SET.has(selectedChartToken)) {
+        void loadSelectedTokenChart();
+      }
+    }
+
+    renderTokenRows(currentPrices, lastPriceChanges);
+    renderPoolSummary(pairSnapshots, currentPrices);
+
+    void updateOrderPreview();
+
+  } catch (error) {
+    console.warn("Additional market pools refresh failed:", error);
+    lastExtraPoolRefreshAt = 0;
+
+  } finally {
+    extraPoolsLoading = false;
+
+    if (
+      lastMarketBlock > 0 &&
+      !historyRefreshing &&
+      Date.now() - lastHistoryRefreshAt >= 300000
+    ) {
+      lastHistoryRefreshAt = Date.now();
+      scheduleMarketHistory(lastMarketBlock);
+    }
+  }
+}
+
+async function refreshMarketVolume(startBlock, latestBlock) {
+  if (volumeRefreshing) return;
+
+  if (Date.now() - lastVolumeRefreshAt < 300000) return;
+
+  volumeRefreshing = true;
+  lastVolumeRefreshAt = Date.now();
+
+  const quoteAtStart = selectedQuote;
+  const pricesAtStart = { ...currentPrices };
+
+  try {
+    const eventData = await read24HourEvents(
+      startBlock,
+      latestBlock,
+      pricesAtStart
+    );
+
+    if (quoteAtStart !== selectedQuote) return;
+
+    poolVolumes = eventData.perPool || {};
+
+    $("totalVolume").textContent = eventData
+      ? numberFormat(eventData.totalVolume, 2) + " " + quoteAtStart
+      : "Unavailable";
+
+  } catch (error) {
+    console.warn("Background 24H volume unavailable:", error);
+
+    if (quoteAtStart === selectedQuote) {
+      $("totalVolume").textContent = "Unavailable";
+    }
+
+  } finally {
+    volumeRefreshing = false;
+
+    // If the quote changed while volume was loading,
+    // run the volume query again for the new quote.
+    if (quoteAtStart !== selectedQuote) {
+      lastVolumeRefreshAt = 0;
+
+      const latestWindow = marketHistoryWindow;
+
+      if (latestWindow) {
+        void refreshMarketVolume(
+          latestWindow.startBlock,
+          latestWindow.latestBlock
+        );
+      }
+    }
+  }
+}
+
+function scheduleMarketHistory(latestBlock, delayMs = 15000) {
+  pendingHistoryBlock = Math.max(
+    pendingHistoryBlock,
+    Number(latestBlock) || 0
+  );
+
+  if (historyLaunchTimer !== null) return;
+
+  const run = () => {
+    const activeId = document.activeElement?.id || "";
+
+    const orderFormFocused = [
+      "orderAmount",
+      "limitPrice",
+      "baseToken",
+      "quoteToken",
+      "orderExpiry",
+      "placeOrderBtn"
+    ].includes(activeId);
+
+    if (
+      document.visibilityState === "hidden" ||
+      orderFormFocused
+    ) {
+      historyLaunchTimer = setTimeout(run, 10000);
+      return;
+    }
+
+    historyLaunchTimer = null;
+
+    const block = pendingHistoryBlock;
+    pendingHistoryBlock = 0;
+
+    if (block > 0 && !historyRefreshing) {
+      void refreshMarketHistory(block);
+    }
+  };
+
+  historyLaunchTimer = setTimeout(run, delayMs);
+}
+
+function scheduleMarketVolume(startBlock, latestBlock, delayMs = 10000) {
+  pendingVolumeWindow = {
+    startBlock,
+    latestBlock
+  };
+
+  if (volumeLaunchTimer !== null) return;
+
+  const run = () => {
+    const activeId = document.activeElement?.id || "";
+
+    const orderFormFocused = [
+      "orderAmount",
+      "limitPrice",
+      "baseToken",
+      "quoteToken",
+      "orderExpiry",
+      "placeOrderBtn"
+    ].includes(activeId);
+
+    if (
+      document.visibilityState === "hidden" ||
+      orderFormFocused
+    ) {
+      volumeLaunchTimer = setTimeout(run, 10000);
+      return;
+    }
+
+    volumeLaunchTimer = null;
+
+    const job = pendingVolumeWindow;
+    pendingVolumeWindow = null;
+
+    if (job) {
+      void refreshMarketVolume(
+        job.startBlock,
+        job.latestBlock
+      );
+    }
+  };
+
+  volumeLaunchTimer = setTimeout(run, delayMs);
+}
+async function refreshMarketHistory(latestBlock) {
+  if (historyRefreshing) return;
+
+  historyRefreshing = true;
+  lastHistoryRefreshAt = Date.now();
+
+  const quoteAtStart = selectedQuote;
+
+  try {
+    const latest = await rpc.getBlock(latestBlock);
+
+    if (!latest) {
+      throw new Error("Cannot read latest block timestamp.");
+    }
+
+    const targetTimestamp = Number(latest.timestamp) - 86400;
+
+    const startBlock = await findBlockAtTimestamp(
+      targetTimestamp,
+      latestBlock
+    );
+
+    if (startBlock === null) {
+      marketHistoryWindow = null;
+
+      $("historyMeta").textContent =
+        "24H historical data unavailable.";
+
+      renderTokenChart(
+        [],
+        "The RPC did not provide a usable 24-hour historical block range."
+      );
+
+      return;
+    }
+
+    marketHistoryWindow = {
+      startBlock,
+      latestBlock,
+      targetTimestamp,
+      latestTimestamp: Number(latest.timestamp),
+      historicalPrices: null
+    };
+
+    // Clear stale changes while the new historical snapshot loads.
+    lastPriceChanges = {};
+
+    renderTokenRows(
+      currentPrices,
+      lastPriceChanges
+    );
+
+    // First load the selected chart.
+    // On first visit this is BTC.
+    await loadSelectedTokenChart();
+
+    // Ignore stale work if the user changed the quote asset.
+    if (quoteAtStart !== selectedQuote) return;
+
+    $("historyMeta").textContent =
+      "Loading 24H reference prices for core assets...";
+
+    // Read historical reserves from the ten default pools only.
+    // Imported token pools are not included in this request.
+    const historicalCoreSnapshots = await readHistoricalPools(
+      startBlock,
+      corePairSnapshots
+    );
+
+    if (quoteAtStart !== selectedQuote) return;
+
+    const coreSymbols = CORE_MARKET_SYMBOLS.filter(
+      symbol => token(symbol)
+    );
+
+    const historicalCorePrices = await buildPriceMap(
+      historicalCoreSnapshots,
+      startBlock,
+      coreSymbols
+    );
+
+    if (quoteAtStart !== selectedQuote) return;
+
+    // Compare current spot prices with historical prices.
+    const changes = renderChanges(
+      currentPrices,
+      historicalCorePrices
+    );
+
+    lastPriceChanges = changes;
+
+    renderTokenRows(
+      currentPrices,
+      lastPriceChanges
+    );
+
+    $("historyMeta").textContent =
+      "24H reference block " +
+      startBlock.toLocaleString("en-US") +
+      " for five core assets.";
+
+    // Trading volume runs independently after chart and price changes.
+    scheduleMarketVolume(startBlock, latestBlock);
+
+  } catch (error) {
+    console.warn(
+      "Background market history unavailable:",
+      error
+    );
+
+    $("historyMeta").textContent =
+      "24H historical data unavailable.";
+
+  } finally {
+    historyRefreshing = false;
+  }
+}
+
 async function refreshMarket() {
-  if (refreshing) return;
+  if (refreshing) {
+    pendingPoolRefresh = true;
+    return;
+  }
 
   refreshing = true;
   $("refreshBtn").disabled = true;
 
   try {
-    setStatus("Updating market data...");
-
     const [network, latestBlock] = await Promise.all([
       rpc.getNetwork(),
       rpc.getBlockNumber()
@@ -1454,119 +2067,72 @@ async function refreshMarket() {
       );
     }
 
-    pairSnapshots = await readCurrentPools();
-    currentPrices = await buildPriceMap(pairSnapshots);
+    lastMarketBlock = latestBlock;
 
-    let historicalPrices = null;
-    let eventData = null;
-    let historicalMessage = "24H historical price unavailable";
+    const corePairs = pairConfig.filter(item => {
+      const parts = String(item.key || "").split("/");
+      return parts.length === 2 &&
+        parts.every(symbol => CORE_MARKET_SET.has(symbol));
+    });
 
-    try {
-      const latest = await rpc.getBlock(latestBlock);
-      if (!latest) throw new Error("Cannot read latest block timestamp.");
-
-      const targetTimestamp = Number(latest.timestamp) - 86400;
-      const startBlock = await findBlockAtTimestamp(
-        targetTimestamp,
-        latestBlock
+    const extraPairs = pairConfig.filter(item => {
+      const parts = String(item.key || "").split("/");
+      return !(
+        parts.length === 2 &&
+        parts.every(symbol => CORE_MARKET_SET.has(symbol))
       );
+    });
 
-      marketHistoryWindow = startBlock !== null
-        ? {
-            startBlock,
-            latestBlock,
-            targetTimestamp,
-            latestTimestamp: Number(latest.timestamp),
-            historicalPrices: null
-          }
-        : null;
+    // Load the ten core pools first. Imported assets do not block
+    // the initial token table or the main market statistics.
+    corePairSnapshots = await readCurrentPools(corePairs);
 
-      if (startBlock !== null) {
-        const results = await Promise.allSettled([
-          readHistoricalPools(startBlock),
-          read24HourEvents(startBlock, latestBlock, currentPrices)
-        ]);
+    pairSnapshots = [
+      ...corePairSnapshots,
+      ...extraPairSnapshots
+    ];
 
-        if (results[0].status === "fulfilled") {
-          historicalPrices = await buildPriceMap(
-            results[0].value,
-            startBlock
-          );
+    const coreSymbols = CORE_MARKET_SYMBOLS.filter(
+      symbol => token(symbol)
+    );
 
-          historicalMessage =
-            `Historical price snapshot: block ${startBlock.toLocaleString("en-US")}`;
-        } else {
-          historicalMessage = "Historical QWAP reserves unavailable from this RPC";
-        }
+    const corePrices = await buildPriceMap(
+      corePairSnapshots,
+      null,
+      coreSymbols
+    );
 
-        if (results[1].status === "fulfilled") {
-          eventData = results[1].value;
-          poolVolumes = eventData.perPool;
-        } else {
-          eventData = null;
-          poolVolumes = {};
-        }
-
-        if (marketHistoryWindow) {
-          marketHistoryWindow.historicalPrices = historicalPrices;
-        }
-      }
-    } catch (error) {
-      console.warn("QWAP 24-hour data unavailable:", error);
-
-      eventData = null;
-      historicalPrices = null;
-      marketHistoryWindow = null;
-      historicalMessage = "24H QWAP historical data unavailable";
+    for (const symbol of coreSymbols) {
+      currentPrices[symbol] =
+        corePrices[symbol] ?? null;
     }
 
-    const changes = renderChanges(currentPrices, historicalPrices);
-    lastPriceChanges = changes;
-
-    renderTokenRows(currentPrices, changes);
+    renderTokenRows(currentPrices, lastPriceChanges);
     renderPoolSummary(pairSnapshots, currentPrices);
 
-    await loadSelectedTokenChart();
-
-    $("currentBlock").textContent = latestBlock.toLocaleString("en-US");
-    $("historyMeta").textContent = historicalMessage;
-
-    $("totalVolume").textContent = eventData
-      ? `${numberFormat(eventData.totalVolume, 2)} ${selectedQuote}`
-      : "Unavailable";
+    $("currentBlock").textContent =
+      latestBlock.toLocaleString("en-US");
 
     $("updatedAt").textContent =
       `Updated ${new Date().toLocaleTimeString()}`;
 
-    const failedPools = pairSnapshots.filter(p => p.error).length;
-    const activePools = pairSnapshots.filter(p =>
-      !p.error && p.reserve0 > 0n && p.reserve1 > 0n
-    ).length;
+    marketCoreLoaded = true;
 
-    const notes = [];
+    setStatus("Market data updated.", "success");
+    void updateOrderPreview();
 
-    if (failedPools) notes.push(`${failedPools} pool reads failed`);
-    if (!eventData) notes.push("24H event data unavailable");
-    else if (!eventData.complete) {
-      notes.push(
-        `24H volume is partial (${eventData.successfulPools} pools queried)`
-      );
-    }
-    if (!historicalPrices) notes.push("24H price change unavailable");
-
-    if (notes.length) {
-      setStatus(
-        `Market data updated at block ${latestBlock}. ${activePools} active pools. ${notes.join("; ")}.`,
-        "warn"
-      );
-    } else {
-      setStatus(
-        `Market data updated at block ${latestBlock}: ${activePools} active pools, prices, liquidity and 24H data.`,
-        "success"
-      );
+    // Imported pools load separately and do not block the default BTC chart.
+    if (extraPairs.length) {
+      void refreshExtraMarketPools(extraPairs);
     }
 
-    updateOrderPreview();
+    // The default chart loads after the six USDT-market pools are ready.
+    if (
+      !historyRefreshing &&
+      Date.now() - lastHistoryRefreshAt >= 300000
+    ) {
+      scheduleMarketHistory(latestBlock);
+    }
   } catch (error) {
     console.error(error);
 
@@ -1574,24 +2140,21 @@ async function refreshMarket() {
       `Market refresh failed: ${error?.shortMessage || error?.message || "Unknown RPC error"}`,
       "error"
     );
+
   } finally {
     refreshing = false;
     $("refreshBtn").disabled = false;
+
+    if (pendingPoolRefresh) {
+      pendingPoolRefresh = false;
+      Promise.resolve().then(() => refreshMarket());
+    }
   }
 }
 
-function selectQuote(symbol) {
-  if (!["USDT", "USDC"].includes(symbol) || selectedQuote === symbol) return;
-
-  selectedQuote = symbol;
-
-  document.querySelectorAll("[data-quote]").forEach((button) => {
-    const active = button.dataset.quote === symbol;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
-  });
-
-  refreshMarket();
+function selectQuote() {
+  // Market valuation is permanently denominated in USDT.
+  selectedQuote = "USDT";
 }
 
 // ============================================================
@@ -1647,6 +2210,374 @@ function refreshQuoteOptions() {
   updateOrderPreview();
 }
 
+const SPEND_BALANCE_ABI = [
+  "function balanceOf(address owner) view returns (uint256)"
+];
+
+const SPEND_BALANCE_CACHE_MS = 15000;
+
+const spendBalanceCache = new Map();
+const spendBalancePending = new Map();
+
+let spendBalanceRequestId = 0;
+
+function ensureSpendBalanceElement() {
+  const label = $("amountLabel");
+
+  if (!label) return null;
+
+  let element = label.querySelector("#orderSpendBalance");
+
+  if (!element) {
+    element = document.createElement("span");
+    element.id = "orderSpendBalance";
+    element.setAttribute("aria-live", "polite");
+
+    label.appendChild(element);
+  }
+
+  // Keep the balance on the same row, aligned to the right.
+  label.style.display = "flex";
+  label.style.alignItems = "center";
+  label.style.justifyContent = "space-between";
+  label.style.gap = "12px";
+  label.style.width = "100%";
+
+  element.style.marginLeft = "auto";
+  element.style.flexShrink = "0";
+  element.style.whiteSpace = "nowrap";
+  element.style.fontSize = "12px";
+  element.style.fontWeight = "500";
+  element.style.opacity = "0.8";
+  element.style.textAlign = "right";
+
+  return element;
+}
+
+function formatSpendWalletBalance(rawBalance, decimals) {
+  const formatted = ethers.formatUnits(
+    rawBalance,
+    decimals
+  );
+
+  const parts = formatted.split(".");
+  const integerPart = parts[0] || "0";
+  const fractionPart = parts[1] || "";
+
+  const groupedInteger = integerPart.replace(
+    /\B(?=(\d{3})+(?!\d))/g,
+    ","
+  );
+
+  // Show up to 8 fractional digits without trailing zeros.
+  const visibleFraction = fractionPart
+    .slice(0, 8)
+    .replace(/0+$/, "");
+
+  return visibleFraction
+    ? `${groupedInteger}.${visibleFraction}`
+    : groupedInteger;
+}
+
+async function refreshSpendBalance(force = false) {
+  const balanceElement = ensureSpendBalanceElement();
+
+  if (!balanceElement) return;
+
+  // Read the latest wallet account from the main application.
+  if (typeof marketContext?.getAccount === "function") {
+    const activeAccount = marketContext.getAccount();
+
+    if (activeAccount !== undefined && activeAccount !== null) {
+      walletAccount = activeAccount || "";
+    }
+  }
+
+  // The token being spent changes with Buy/Sell.
+  const spendSymbol = currentSide === "buy"
+    ? $("quoteToken")?.value
+    : $("baseToken")?.value;
+
+  const spendToken = spendSymbol
+    ? token(spendSymbol)
+    : null;
+
+  if (!walletAccount) {
+    balanceElement.textContent = "Connect wallet";
+    return;
+  }
+
+  if (!spendToken?.address || !ethers.isAddress(spendToken.address)) {
+    balanceElement.textContent = "Balance unavailable";
+    return;
+  }
+
+  const account = walletAccount;
+  const accountKey = account.toLowerCase();
+
+  const tokenAddress = spendToken.address.toLowerCase();
+
+  const cacheKey = [
+    accountKey,
+    tokenAddress,
+    spendToken.native ? "native" : "erc20"
+  ].join(":");
+
+  const requestId = ++spendBalanceRequestId;
+
+  const isStillSelected = () => {
+    const currentSymbol = currentSide === "buy"
+      ? $("quoteToken")?.value
+      : $("baseToken")?.value;
+
+    const currentAccount =
+      typeof marketContext?.getAccount === "function"
+        ? (marketContext.getAccount() || "")
+        : walletAccount;
+
+    return (
+      requestId === spendBalanceRequestId &&
+      currentSymbol === spendSymbol &&
+      currentAccount.toLowerCase() === accountKey
+    );
+  };
+
+  // Reuse a fresh result while the user is typing.
+  const cached = spendBalanceCache.get(cacheKey);
+
+  if (
+    !force &&
+    cached &&
+    Date.now() - cached.timestamp < SPEND_BALANCE_CACHE_MS
+  ) {
+    if (isStillSelected()) {
+      const element = ensureSpendBalanceElement();
+
+      if (element) {
+        element.textContent =
+          `Balance: ${formatSpendWalletBalance(
+            cached.balance,
+            spendToken.decimals
+          )} ${spendSymbol}`;
+      }
+    }
+
+    return;
+  }
+
+  balanceElement.textContent = `Balance: Loading ${spendSymbol}...`;
+
+  let pending = spendBalancePending.get(cacheKey);
+
+  if (!pending) {
+    pending = (async () => {
+      // QMS is the native QMS balance.
+      if (spendToken.native) {
+        return await rpc.getBalance(account);
+      }
+
+      // Other tokens use ERC20 balanceOf().
+      const contract = new ethers.Contract(
+        spendToken.address,
+        SPEND_BALANCE_ABI,
+        rpc
+      );
+
+      return await contract.balanceOf(account);
+    })();
+
+    spendBalancePending.set(cacheKey, pending);
+  }
+
+  try {
+    const rawBalance = await pending;
+
+    spendBalanceCache.set(cacheKey, {
+      balance: rawBalance,
+      timestamp: Date.now()
+    });
+
+    if (!isStillSelected()) return;
+
+    const element = ensureSpendBalanceElement();
+
+    if (element) {
+      element.textContent =
+        `Balance: ${formatSpendWalletBalance(
+          rawBalance,
+          spendToken.decimals
+        )} ${spendSymbol}`;
+    }
+
+  } catch (error) {
+    console.debug(
+      "Wallet spend balance unavailable:",
+      spendSymbol,
+      error
+    );
+
+    if (isStillSelected()) {
+      const element = ensureSpendBalanceElement();
+
+      if (element) {
+        element.textContent = "Balance: Unavailable";
+      }
+    }
+
+  } finally {
+    if (spendBalancePending.get(cacheKey) === pending) {
+      spendBalancePending.delete(cacheKey);
+    }
+  }
+}
+
+function getTokenUsdtPrice(symbol) {
+  if (!symbol) return null;
+
+  if (symbol === "USDT") return 1;
+
+  const tokenPrice = Number(currentPrices[symbol]);
+  const usdtPriceInMarketQuote = Number(currentPrices.USDT);
+
+  if (
+    Number.isFinite(tokenPrice) &&
+    tokenPrice > 0 &&
+    Number.isFinite(usdtPriceInMarketQuote) &&
+    usdtPriceInMarketQuote > 0
+  ) {
+    return tokenPrice / usdtPriceInMarketQuote;
+  }
+
+  // Fallback for the stablecoin while the first price snapshot loads.
+  if (symbol === "USDC") return 1;
+
+  return null;
+}
+
+async function getQwapPriceScaled(tokenInMeta, tokenOutMeta, blockTag = null) {
+  if (!tokenInMeta || !tokenOutMeta || !routerRead) {
+    throw new Error("Market price source is unavailable.");
+  }
+
+  if (
+    tokenInMeta.address.toLowerCase() ===
+    tokenOutMeta.address.toLowerCase()
+  ) {
+    return 10n ** 18n;
+  }
+
+  const amountIn = 10n ** BigInt(tokenInMeta.decimals);
+  const route = await findBestQwapRoute(
+    tokenInMeta.address,
+    tokenOutMeta.address,
+    amountIn,
+    pairSnapshots,
+    blockTag,
+    5,
+    48
+  );
+
+  if (!route || route.amountOut <= 0n) {
+    throw new Error(
+      `No active market route can price ${tokenInMeta.symbol} in ${tokenOutMeta.symbol}.`
+    );
+  }
+
+  // `amountIn` is exactly one whole input token. Convert the Router output
+  // into an 18-decimal human price without passing through a JS float.
+  return (
+    BigInt(route.amountOut) * (10n ** 18n) /
+    (10n ** BigInt(tokenOutMeta.decimals))
+  );
+}
+
+function formatUsdtEntryPrice(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number) || number <= 0) {
+    return "";
+  }
+
+  const fixed = number.toFixed(6);
+  const parts = fixed.split(".");
+  const whole = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fraction = parts[1].replace(/0+$/, "");
+
+  return `${whole}.${fraction.length ? fraction : "00"}`;
+}
+
+function orderEntryMetadataStorageKey() {
+  if (!walletAccount || !orderBookAddress) return null;
+
+  return (
+    `qmswap.limitOrderEntry.v1.${CHAIN_ID}.` +
+    `${String(walletAccount).toLowerCase()}.` +
+    `${String(orderBookAddress).toLowerCase()}`
+  );
+}
+
+function readOrderEntryMetadataStore() {
+  try {
+    const key = orderEntryMetadataStorageKey();
+    if (!key) return {};
+
+    const saved = JSON.parse(localStorage.getItem(key) || "{}");
+
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveOrderEntryMetadata(orderId, preview) {
+  try {
+    const key = orderEntryMetadataStorageKey();
+
+    if (!key || !orderId || !preview) return;
+
+    const store = readOrderEntryMetadataStore();
+
+    const recordKey =
+      `${String(orderId)}:` +
+      `${String(preview.tokenIn.address).toLowerCase()}:` +
+      `${String(preview.tokenOut.address).toLowerCase()}`;
+
+    store[recordKey] = {
+      baseSymbol: preview.baseSymbol,
+      quoteSymbol: preview.quoteSymbol,
+      limitPriceUsdt: String(preview.limitPriceUsdt),
+      side: preview.buying ? "buy" : "sell",
+      savedAt: Date.now()
+    };
+
+    const entries = Object.entries(store).slice(-150);
+
+    localStorage.setItem(
+      key,
+      JSON.stringify(Object.fromEntries(entries))
+    );
+  } catch (error) {
+    console.warn("Could not save local order entry metadata:", error);
+  }
+}
+
+function getOrderEntryMetadata(order) {
+  try {
+    if (!order?.id) return null;
+
+    const store = readOrderEntryMetadataStore();
+
+    const recordKey =
+      `${String(order.id)}:` +
+      `${String(order.tokenIn).toLowerCase()}:` +
+      `${String(order.tokenOut).toLowerCase()}`;
+
+    return store[recordKey] || null;
+  } catch {
+    return null;
+  }
+}
+
 async function getOrderPreview() {
   const baseSymbol = $("baseToken").value;
   const quoteSymbol = $("quoteToken").value;
@@ -1665,15 +2596,19 @@ async function getOrderPreview() {
     throw new Error("Enter an amount and limit price.");
   }
 
-  const priceScaled = ethers.parseUnits(priceText, 18);
-  if (priceScaled <= 0n) {
+  // User input is always USDT per BASE token.
+  const limitPriceUsdtScaled = ethers.parseUnits(priceText, 18);
+
+  if (limitPriceUsdtScaled <= 0n) {
     throw new Error("Limit price must be greater than zero.");
   }
 
   const buying = currentSide === "buy";
+
   const tokenIn = buying ? quote : base;
   const tokenOut = buying ? base : quote;
 
+  // The amount is still denominated in the actual escrow token.
   const amountIn = ethers.parseUnits(
     amountText,
     tokenIn.decimals
@@ -1681,6 +2616,46 @@ async function getOrderPreview() {
 
   if (amountIn <= 0n) {
     throw new Error("Amount must be greater than zero.");
+  }
+
+  // Pin all preview route quotes to one block so the Router comparison and
+  // minimum-size search cannot mix reserve states from different blocks.
+  const quoteBlock = await rpc.getBlockNumber();
+
+  // Convert the selected quote asset into USDT using the same live QWAP
+  // Router used by Market Price and by the V3 Order Book.
+  const usdt = token("USDT");
+  if (!usdt) throw new Error("USDT is missing from the token registry.");
+
+  const quotePriceUsdtScaled = await getQwapPriceScaled(
+    quote,
+    usdt,
+    quoteBlock
+  );
+  if (quotePriceUsdtScaled <= 0n) {
+    throw new Error("Invalid quote-to-USDT conversion.");
+  }
+
+  const quotePriceUsdt = Number(
+    ethers.formatUnits(quotePriceUsdtScaled, 18)
+  );
+
+  if (!Number.isFinite(quotePriceUsdt) || quotePriceUsdt <= 0) {
+    throw new Error("The market returned an invalid quote-to-USDT price.");
+  }
+
+  // Convert USDT per BASE to selected QUOTE per BASE.
+  const conversionNumerator =
+    limitPriceUsdtScaled * (10n ** 18n);
+
+  // Buy rounds down: a stricter maximum buy price.
+  // Sell rounds up: a stricter minimum sell price.
+  const priceScaled = buying
+    ? conversionNumerator / quotePriceUsdtScaled
+    : ceilDiv(conversionNumerator, quotePriceUsdtScaled);
+
+  if (priceScaled <= 0n) {
+    throw new Error("Converted limit price is too small.");
   }
 
   let minAmountOut;
@@ -1696,6 +2671,7 @@ async function getOrderPreview() {
       priceScaled;
 
     minAmountOut = ceilDiv(numerator, denominator);
+
   } else {
     const numerator =
       amountIn *
@@ -1713,21 +2689,83 @@ async function getOrderPreview() {
     throw new Error("Calculated minimum output is zero.");
   }
 
-  const route = await findBestQwapRoute(
-    tokenIn.address,
-    tokenOut.address,
-    amountIn
-  );
-
-  if (!route || !route.path?.length) {
-    throw new Error(
-      "No active QWAP route exists for this token pair. No pool will be created."
+  let route = null;
+  try {
+    route = await findBestQwapRoute(
+      tokenIn.address,
+      tokenOut.address,
+      amountIn,
+      pairSnapshots,
+      quoteBlock
     );
+  } catch (error) {
+    if (!isInsufficientRouteAmountError(error)) throw error;
+  }
+
+  // A spend below the route's smallest non-zero output can make the normal
+  // quote return no route. Find the best path with a reference-sized input,
+  // then keep the actual order-size output at zero for the preflight check.
+  if (!route || !route.path?.length) {
+    const referenceAmount = 10n ** BigInt(tokenIn.decimals);
+    const referenceRoute = await findBestQwapRoute(
+      tokenIn.address,
+      tokenOut.address,
+      referenceAmount,
+      pairSnapshots,
+      quoteBlock
+    );
+
+    if (!referenceRoute?.path?.length) {
+      throw new Error(
+        "No active market route exists for this token pair. No pool will be created."
+      );
+    }
+
+    let actualAmountOut = 0n;
+    try {
+      const actualAmounts = await routerRead.getAmountsOut(
+        amountIn,
+        referenceRoute.path,
+        { blockTag: quoteBlock }
+      );
+      if (actualAmounts?.length === referenceRoute.path.length) {
+        actualAmountOut = BigInt(actualAmounts[actualAmounts.length - 1]);
+      }
+    } catch (error) {
+      if (!isInsufficientRouteAmountError(error)) throw error;
+    }
+
+    route = { ...referenceRoute, amountOut: actualAmountOut };
+  }
+
+  const humanInput = Number(ethers.formatUnits(amountIn, tokenIn.decimals));
+  const humanOutput = Number(ethers.formatUnits(route.amountOut, tokenOut.decimals));
+
+  const quotePerBase = humanOutput > 0
+    ? (buying ? humanInput / humanOutput : humanOutput / humanInput)
+    : null;
+
+  const currentExecutionPriceUsdt =
+    quotePerBase === null ? null : quotePerBase * quotePriceUsdt;
+
+  // Read the one-token USDT reference at the same block as the exact-size
+  // execution quote. If it is unavailable, fall back to the Market snapshot.
+  let spotPriceUsdt = getTokenUsdtPrice(baseSymbol);
+  try {
+    const spotScaled = await getQwapPriceScaled(base, usdt, quoteBlock);
+    const spotValue = Number(ethers.formatUnits(spotScaled, 18));
+    if (Number.isFinite(spotValue) && spotValue > 0) {
+      spotPriceUsdt = spotValue;
+    }
+  } catch (error) {
+    console.warn("Exact-block USDT spot reference unavailable:", error);
   }
 
   return {
     base,
     quote,
+    baseSymbol,
+    quoteSymbol,
     tokenIn,
     tokenOut,
     amountIn,
@@ -1735,13 +2773,275 @@ async function getOrderPreview() {
     path: route.path,
     routeQuote: route.amountOut,
     priceScaled,
+    limitPriceUsdt: priceText,
+    quotePriceUsdt,
+    currentExecutionPriceUsdt,
+    spotPriceUsdt,
+    quoteBlock,
     buying
   };
 }
 
+function formatRawTokenAmount(rawAmount, tokenMeta) {
+  const formatted = ethers.formatUnits(BigInt(rawAmount), tokenMeta.decimals);
+  const [whole = "0", fraction = ""] = formatted.split(".");
+  const groupedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fraction ? `${groupedWhole}.${fraction}` : groupedWhole;
+}
+
+function requiredOutputForAmount(amountIn, preview) {
+  const amount = BigInt(amountIn);
+  if (preview.buying) {
+    const numerator =
+      amount *
+      (10n ** BigInt(preview.base.decimals)) *
+      (10n ** 18n);
+    const denominator =
+      (10n ** BigInt(preview.quote.decimals)) *
+      preview.priceScaled;
+    return ceilDiv(numerator, denominator);
+  }
+
+  const numerator =
+    amount *
+    preview.priceScaled *
+    (10n ** BigInt(preview.quote.decimals));
+  const denominator =
+    (10n ** BigInt(preview.base.decimals)) *
+    (10n ** 18n);
+  return ceilDiv(numerator, denominator);
+}
+
+const MINIMUM_ROUTE_SPEND_CACHE_MS = 15000;
+const minimumRouteSpendCache = new Map();
+
+function isInsufficientRouteAmountError(error) {
+  const reason = String(
+    error?.shortMessage || error?.reason || error?.message || ""
+  );
+  return /INSUFFICIENT_INPUT_AMOUNT|INSUFFICIENT_OUTPUT_AMOUNT|INSUFFICIENT_LIQUIDITY|zero output|output amount is zero|ds-math-sub-underflow/i.test(reason);
+}
+
+function getSpotLimitMismatch(preview, routeQuote = preview.routeQuote) {
+  const spotPriceUsdt =
+    Number.isFinite(preview.spotPriceUsdt) && preview.spotPriceUsdt > 0
+      ? preview.spotPriceUsdt
+      : getTokenUsdtPrice(preview.baseSymbol);
+  const limitPriceUsdt = Number(preview.limitPriceUsdt);
+
+  if (
+    !Number.isFinite(spotPriceUsdt) ||
+    spotPriceUsdt <= 0 ||
+    !Number.isFinite(limitPriceUsdt) ||
+    limitPriceUsdt <= 0
+  ) return null;
+
+  const spotConditionReached = preview.buying
+    ? spotPriceUsdt <= limitPriceUsdt
+    : spotPriceUsdt >= limitPriceUsdt;
+
+  const actualOutput = BigInt(routeQuote);
+  const requiredOutput = BigInt(preview.minAmountOut);
+
+  // A legitimate out-of-range limit may wait. Block only when the displayed
+  // USDT spot says the limit has been reached but the exact order-size route
+  // still cannot deliver the order's required minimum output.
+  if (!spotConditionReached || actualOutput >= requiredOutput) return null;
+
+  const inputHuman = Number(
+    ethers.formatUnits(preview.amountIn, preview.tokenIn.decimals)
+  );
+  const outputHuman = Number(
+    ethers.formatUnits(actualOutput, preview.tokenOut.decimals)
+  );
+  const quotePerBase = preview.buying
+    ? inputHuman / outputHuman
+    : outputHuman / inputHuman;
+  const executionPriceUsdt = quotePerBase * preview.quotePriceUsdt;
+
+  return {
+    spotPriceUsdt,
+    limitPriceUsdt,
+    actualOutput,
+    requiredOutput,
+    shortfall: requiredOutput - actualOutput,
+    executionPriceUsdt
+  };
+}
+
+async function findExecutableSpendRange(preview, isCurrentRequest) {
+  if (!routerRead) return null;
+  const originalAmount = BigInt(preview.amountIn);
+  if (originalAmount <= 0n) return null;
+
+  const quoteAtPreviewBlock = amount =>
+    Number.isSafeInteger(preview.quoteBlock)
+      ? routerRead.getAmountsOut(amount, preview.path, { blockTag: preview.quoteBlock })
+      : routerRead.getAmountsOut(amount, preview.path);
+
+  async function evaluate(amount) {
+    try {
+      const amounts = await quoteAtPreviewBlock(amount);
+      if (!isCurrentRequest()) return null;
+      if (!amounts || amounts.length !== preview.path.length) {
+        return { amountIn: amount, executable: false, routeQuote: 0n };
+      }
+      const routeQuote = BigInt(amounts[amounts.length - 1]);
+      const minAmountOut = requiredOutputForAmount(amount, preview);
+      return { amountIn: amount, routeQuote, minAmountOut, executable: routeQuote >= minAmountOut };
+    } catch (error) {
+      if (!isCurrentRequest()) return null;
+      const reason = String(error?.shortMessage || error?.reason || error?.message || "");
+      if (/INSUFFICIENT_INPUT_AMOUNT|INSUFFICIENT_OUTPUT_AMOUNT|INSUFFICIENT_LIQUIDITY|zero output/i.test(reason)) {
+        return { amountIn: amount, executable: false, routeQuote: 0n };
+      }
+      throw error;
+    }
+  }
+
+  async function refineMinimum(failAmount, passResult) {
+    let low = BigInt(failAmount);
+    let high = BigInt(passResult.amountIn);
+    let best = passResult;
+    const iterations = Math.min(48, Math.max(18, preview.tokenIn.decimals + 8));
+    for (let i = 0; i < iterations; i++) {
+      const middle = (low + high) / 2n;
+      if (middle <= low || middle >= high) break;
+      const result = await evaluate(middle);
+      if (!result) return null;
+      if (result.executable) { high = middle; best = result; }
+      else low = middle;
+    }
+    const finalResult = await evaluate(high);
+    return finalResult?.executable ? finalResult : best;
+  }
+
+  async function refineMaximum(passResult, failAmount) {
+    let low = BigInt(passResult.amountIn);
+    let high = BigInt(failAmount);
+    let best = passResult;
+    const iterations = Math.min(48, Math.max(18, preview.tokenIn.decimals + 8));
+    for (let i = 0; i < iterations; i++) {
+      const middle = (low + high) / 2n;
+      if (middle <= low || middle >= high) break;
+      const result = await evaluate(middle);
+      if (!result) return null;
+      if (result.executable) { low = middle; best = result; }
+      else high = middle;
+    }
+    const finalResult = await evaluate(low);
+    return finalResult?.executable ? finalResult : best;
+  }
+
+  // A large order can fail because its price impact is too high. Search down
+  // first; when a passing amount is found, locate both spend boundaries.
+  let candidate = originalAmount;
+  let largestPassing = null;
+  let smallestPassing = null;
+  let lowerFailure = null;
+  const maxHalvings = Math.min(80, Math.max(32, preview.tokenIn.decimals + 44));
+
+  for (let i = 0; i < maxHalvings; i++) {
+    candidate /= 2n;
+    if (candidate < 1n) break;
+    const result = await evaluate(candidate);
+    if (!result) return null;
+    if (result.executable) {
+      if (!largestPassing) largestPassing = result;
+      smallestPassing = result;
+    } else if (largestPassing) {
+      lowerFailure = result;
+      break;
+    }
+    if (candidate === 1n) break;
+  }
+
+  if (largestPassing) {
+    const minimum = lowerFailure
+      ? await refineMinimum(lowerFailure.amountIn, smallestPassing)
+      : smallestPassing;
+    const maximum = await refineMaximum(largestPassing, originalAmount);
+    if (!minimum || !maximum) return null;
+    return {
+      minAmountIn: minimum.amountIn,
+      maxAmountIn: maximum.amountIn,
+      minRouteQuote: minimum.routeQuote,
+      maxRouteQuote: maximum.routeQuote,
+      searchedUpTo: originalAmount
+    };
+  }
+
+  // If every smaller amount fails (for example, output rounds to zero),
+  // search upward to find the first executable amount.
+  let lowerFailureAmount = originalAmount;
+  candidate = originalAmount;
+  let firstPassing = null;
+  const maxSearchAmount = 1024n * (10n ** BigInt(preview.tokenIn.decimals));
+  const maxDoublings = Math.min(80, Math.max(32, preview.tokenIn.decimals + 44));
+  for (let i = 0; i < maxDoublings && candidate < maxSearchAmount; i++) {
+    candidate *= 2n;
+    if (candidate > maxSearchAmount) candidate = maxSearchAmount;
+    const result = await evaluate(candidate);
+    if (!result) return null;
+    if (result.executable) {
+      firstPassing = await refineMinimum(lowerFailureAmount, result);
+      break;
+    }
+    lowerFailureAmount = candidate;
+  }
+
+  if (!firstPassing) {
+    return { minAmountIn: null, maxAmountIn: null, searchedUpTo: candidate };
+  }
+
+  let lastPassing = firstPassing;
+  let upperFailure = null;
+  candidate = firstPassing.amountIn;
+  for (let i = 0; i < maxDoublings; i++) {
+    candidate *= 2n;
+    const result = await evaluate(candidate);
+    if (!result) return null;
+    if (result.executable) lastPassing = result;
+    else { upperFailure = candidate; break; }
+  }
+
+  const maximum = upperFailure
+    ? await refineMaximum(lastPassing, upperFailure)
+    : null;
+  if (upperFailure && !maximum) return null;
+  return {
+    minAmountIn: firstPassing.amountIn,
+    maxAmountIn: maximum?.amountIn ?? null,
+    minRouteQuote: firstPassing.routeQuote,
+    maxRouteQuote: maximum?.routeQuote ?? null,
+    searchedUpTo: candidate
+  };
+}
+
+function buildSpotLimitMismatchMessage(preview, spendRange) {
+  const symbol = preview.tokenIn.symbol;
+  const limit = formatUsdtEntryPrice(preview.limitPriceUsdt);
+  const entered = BigInt(preview.amountIn);
+
+  if (spendRange?.minAmountIn) {
+    const minimum = formatRawTokenAmount(spendRange.minAmountIn, preview.tokenIn);
+    if (entered < spendRange.minAmountIn) {
+      return `Minimum Spend: ${minimum} ${symbol} \u{2014} Enter at least ${minimum} ${symbol} to meet the ${limit} USDT / ${preview.baseSymbol} limit now.`;
+    }
+
+    if (spendRange.maxAmountIn && entered > spendRange.maxAmountIn) {
+      const maximum = formatRawTokenAmount(spendRange.maxAmountIn, preview.tokenIn);
+      return `Maximum Spend: ${maximum} ${symbol} \u{2014} Reduce the spend to ${maximum} ${symbol} or less to meet the limit now.`;
+    }
+
+    return `QWAP quote changed during preflight \u{2014} refresh the quote before placing this order.`;
+  }
+
+  return `No executable spend amount meets the ${limit} USDT / ${preview.baseSymbol} limit on the current QWAP route.`;
+}
+
 async function updateOrderPreview() {
   const sequence = ++previewRequestId;
-
   const baseSymbol = $("baseToken").value;
   const quoteSymbol = $("quoteToken").value;
 
@@ -1749,57 +3049,70 @@ async function updateOrderPreview() {
     ? `Amount to spend (${quoteSymbol})`
     : `Amount to sell (${baseSymbol})`;
 
-  $("priceLabel").textContent =
-    `Limit price (${quoteSymbol} per ${baseSymbol})`;
+  if (typeof refreshSpendBalance === "function") {
+    void refreshSpendBalance();
+  }
 
+  $("priceLabel").textContent = `Limit price (USDT per ${baseSymbol})`;
   $("orderDirection").textContent = currentSide === "buy"
     ? `${quoteSymbol}  ${baseSymbol}`
     : `${baseSymbol}  ${quoteSymbol}`;
-
   $("placeOrderBtn").disabled = true;
 
   try {
     const preview = await getOrderPreview();
-
     if (sequence !== previewRequestId) return;
 
-    const minimum = ethers.formatUnits(
-      preview.minAmountOut,
-      preview.tokenOut.decimals
-    );
-
-    const currentQuote = ethers.formatUnits(
-      preview.routeQuote,
-      preview.tokenOut.decimals
-    );
-
-    const routeSymbols = preview.path.map(address =>
-      symbolForAddress(address)
-    );
-
     $("minimumOutput").textContent =
-      `${numberFormat(Number(minimum), 8)} ${preview.tokenOut.symbol}`;
+      `${formatRawTokenAmount(preview.minAmountOut, preview.tokenOut)} ${preview.tokenOut.symbol}`;
+
+    const marketableNow = preview.routeQuote >= preview.minAmountOut;
+    const spotMismatch = getSpotLimitMismatch(preview);
+
+    if (spotMismatch) {
+      let spendRange = null;
+      let spendSearchError = null;
+      try {
+        spendRange = await findExecutableSpendRange(
+          preview,
+          () => sequence === previewRequestId
+        );
+      } catch (error) {
+        spendSearchError = error;
+        console.warn("Executable minimum-spend search failed:", error);
+      }
+
+      if (sequence !== previewRequestId) return;
+
+      $("executionCondition").textContent = spendSearchError
+        ? "Minimum Spend: unavailable \u{2014} QWAP Router quote failed. Refresh the quote."
+        : buildSpotLimitMismatchMessage(preview, spendRange);
+      $("placeOrderBtn").disabled = true;
+      $("placeOrderBtn").textContent = "Adjust Spend Amount";
+      return;
+    }
+
+    const routeSymbols = preview.path.map(address => symbolForAddress(address));
+    const convertedLimit = Number(ethers.formatUnits(preview.priceScaled, 18));
+    const currentQuote = formatRawTokenAmount(preview.routeQuote, preview.tokenOut);
 
     $("executionCondition").textContent =
-      `${currentSide === "buy" ? "Buy only at or below" : "Sell only at or above"} ` +
-      `${$("limitPrice").value} ${quoteSymbol}. ` +
-      `Route: ${routeSymbols.join("  ")}. ` +
-      `Current quote: ${numberFormat(Number(currentQuote), 8)} ${preview.tokenOut.symbol}.`;
-
+      `${preview.buying ? "Buy only at or below" : "Sell only at or above"} ${formatUsdtEntryPrice(preview.limitPriceUsdt)} USDT / ${baseSymbol}`;
     $("placeOrderBtn").disabled = !orderBookAddress;
     $("placeOrderBtn").textContent = orderBookAddress
       ? "Place Limit Order"
-      : "Preview Only  Limit Orders Unavailable";
+      : "Preview Only  Order Book Not Deployed";
   } catch (error) {
     if (sequence !== previewRequestId) return;
-
     $("minimumOutput").textContent = "";
-    $("executionCondition").textContent = error.message;
-
+    const displayLimit = formatUsdtEntryPrice($("limitPrice").value);
+    $("executionCondition").textContent = displayLimit
+      ? `${currentSide === "buy" ? "Buy only at or below" : "Sell only at or above"} ${displayLimit} USDT / ${baseSymbol}`
+      : "Enter a valid limit price.";
     $("placeOrderBtn").disabled = true;
     $("placeOrderBtn").textContent = orderBookAddress
       ? "Enter Valid Order Details"
-      : "Preview Only  Limit Orders Unavailable";
+      : "Preview Only  Order Book Not Deployed";
   }
 }
 
@@ -1874,7 +3187,7 @@ async function loadOrderBookDeployment() {
 
     if (!response.ok) {
       setOrderStatus(
-        "Limit Order service is not configured. Market data and previews remain available; new orders are disabled.",
+        "QMSwap Limit Order service is not configured. Market prices and previews remain available; new Limit Orders are disabled.",
         "warn"
       );
 
@@ -1909,14 +3222,14 @@ async function loadOrderBookDeployment() {
       deployedRouter.toLowerCase() !==
       qwapConfig.routerAddress.toLowerCase()
     ) {
-      throw new Error("V3 Order Book is not connected to the configured QWAP Router.");
+      throw new Error("V3 Order Book configuration does not match this market.");
     }
 
     orderBookAddress = ethers.getAddress(address);
     orderBookConfig = data;
 
     setOrderStatus(
-      `Limit Order service connected.`,
+      `QMSwap Limit Order service connected: ${compactAddress(address)}.`,
       "success"
     );
   } catch (error) {
@@ -1969,25 +3282,54 @@ async function ensureAllowance(tokenMeta, amount, spender) {
 
 async function placeLimitOrder() {
   if (!orderBookAddress) {
-    throw new Error("QWAP V3 Order Book has not been deployed/configured.");
+    throw new Error("QMSwap Limit Order service is not configured.");
   }
 
   await ensureSharedWallet();
 
   const preview = await getOrderPreview();
 
-  // Recheck the selected route immediately before escrow.
+  // Recheck the exact QWAP route against the limit-derived minimum output
+  // immediately before any approval or escrow transaction.
+  const liveQuoteBlock = await rpc.getBlockNumber();
   const liveAmounts = await routerRead.getAmountsOut(
     preview.amountIn,
-    preview.path
+    preview.path,
+    { blockTag: liveQuoteBlock }
   );
 
-  if (
-    !liveAmounts ||
-    liveAmounts.length !== preview.path.length ||
-    liveAmounts[liveAmounts.length - 1] <= 0n
-  ) {
-    throw new Error("The selected QWAP route is no longer available.");
+  if (!liveAmounts || liveAmounts.length !== preview.path.length) {
+    throw new Error("The selected market route is no longer available. Refresh the quote.");
+  }
+
+  const liveRouteQuote = BigInt(liveAmounts[liveAmounts.length - 1]);
+  const livePreview = {
+    ...preview,
+    quoteBlock: liveQuoteBlock,
+    routeQuote: liveRouteQuote
+  };
+
+  try {
+    const usdtToken = token("USDT");
+    if (usdtToken) {
+      const liveSpotScaled = await getQwapPriceScaled(
+        preview.base,
+        usdtToken,
+        liveQuoteBlock
+      );
+      const liveSpot = Number(ethers.formatUnits(liveSpotScaled, 18));
+      if (Number.isFinite(liveSpot) && liveSpot > 0) {
+        livePreview.spotPriceUsdt = liveSpot;
+      }
+    }
+  } catch (error) {
+    console.warn("Final USDT spot check unavailable:", error);
+  }
+
+  const liveMismatch = getSpotLimitMismatch(livePreview, liveRouteQuote);
+  if (liveMismatch) {
+    const spendRange = await findExecutableSpendRange(livePreview, () => true);
+    throw new Error(buildSpotLimitMismatchMessage(livePreview, spendRange));
   }
 
   const expirySeconds = Number($("orderExpiry").value);
@@ -2024,7 +3366,7 @@ async function placeLimitOrder() {
       : { value: 0n };
 
     setOrderStatus(
-      "Submitting Limit Order. Confirm the transaction in your wallet...",
+      "Submitting QMSwap Limit Order. Confirm the transaction in your wallet...",
       "warn"
     );
 
@@ -2038,20 +3380,71 @@ async function placeLimitOrder() {
     );
 
     setOrderStatus(
-      `V3 orderTransaction submitted: ${compactAddress(tx.hash)}`,
+      `V3 order transaction submitted: ${compactAddress(tx.hash)}`,
       "warn"
     );
 
-    await tx.wait();
+    const receipt = await tx.wait();
+
+    // Parse OrderCreated from the order-book receipt.
+    // The exact USDT price is saved locally, keyed by order ID.
+    const entryEventInterface = new ethers.Interface(V3_ORDERBOOK_ABI);
+
+    let createdOrderId = null;
+
+    for (const log of receipt.logs || []) {
+      if (
+        String(log.address || "").toLowerCase() !==
+        String(orderBookAddress || "").toLowerCase()
+      ) {
+        continue;
+      }
+
+      try {
+        const parsed = entryEventInterface.parseLog({
+          topics: log.topics,
+          data: log.data
+        });
+
+        if (parsed?.name !== "OrderCreated") continue;
+
+        const eventOwner = parsed.args.owner;
+
+        if (
+          eventOwner &&
+          String(eventOwner).toLowerCase() !==
+            String(walletAccount).toLowerCase()
+        ) {
+          continue;
+        }
+
+        createdOrderId = String(parsed.args.orderId);
+        break;
+
+      } catch {
+        // Ignore unrelated receipt logs.
+      }
+    }
+
+    if (createdOrderId) {
+      saveOrderEntryMetadata(
+        createdOrderId,
+        preview
+      );
+    } else {
+      console.warn(
+        "OrderCreated ID could not be parsed. Entry will use an on-chain approximation."
+      );
+    }
 
     setOrderStatus(
-      "Limit Order created. It will execute when the limit condition is met.",
+      "QMSwap Limit Order created successfully.",
       "success"
     );
 
     $("orderAmount").value = "";
 
-    await loadMyOrders();
+    await loadMyOrders(true);
     await refreshMarket();
   } finally {
     updateOrderPreview();
@@ -2084,7 +3477,7 @@ function formatRawTokenRatio(
     !numeratorMeta ||
     !denominatorMeta
   ) {
-    return "—";
+    return "\u{2014}";
   }
 
   const numeratorScale =
@@ -2130,68 +3523,355 @@ function formatOrderEntry(
   tokenInSymbol,
   tokenOutSymbol
 ) {
-  if (!tokenInMeta || !tokenOutMeta) return "—";
+  if (!tokenInMeta || !tokenOutMeta) return "";
 
+  // New orders display the exact USDT price entered by the user.
+  const saved = getOrderEntryMetadata(order);
+
+  if (saved?.limitPriceUsdt && saved?.baseSymbol) {
+    return (
+      `${formatUsdtEntryPrice(saved.limitPriceUsdt)} USDT / ` +
+      `${saved.baseSymbol}`
+    );
+  }
+
+  // Old orders have no stored original USDT limit price.
+  // Reconstruct an approximate value from their on-chain minimum output.
   const stableQuotes = new Set(["USDT", "USDC"]);
 
-  // Buy: quote token is spent, base token is received.
-  if (
-    stableQuotes.has(tokenInSymbol) &&
-    !stableQuotes.has(tokenOutSymbol)
-  ) {
-    const price = formatRawTokenRatio(
+  let quoteSymbol;
+  let baseSymbol;
+  let quotePerBaseText;
+
+  if (stableQuotes.has(tokenInSymbol)) {
+    quoteSymbol = tokenInSymbol;
+    baseSymbol = tokenOutSymbol;
+
+    quotePerBaseText = formatRawTokenRatio(
       order.amountIn,
       tokenInMeta,
       order.minAmountOut,
-      tokenOutMeta
+      tokenOutMeta,
+      12
     );
 
-    return `${price} ${tokenInSymbol} / ${tokenOutSymbol}`;
-  }
+  } else if (stableQuotes.has(tokenOutSymbol)) {
+    quoteSymbol = tokenOutSymbol;
+    baseSymbol = tokenInSymbol;
 
-  // Sell: base token is sold, quote token is received.
-  if (
-    stableQuotes.has(tokenOutSymbol) &&
-    !stableQuotes.has(tokenInSymbol)
-  ) {
-    const price = formatRawTokenRatio(
+    quotePerBaseText = formatRawTokenRatio(
       order.minAmountOut,
       tokenOutMeta,
       order.amountIn,
-      tokenInMeta
+      tokenInMeta,
+      12
     );
 
-    return `${price} ${tokenOutSymbol} / ${tokenInSymbol}`;
+  } else {
+    // For older non-stable pairs, infer the quote asset using
+    // their current indicative USDT prices.
+    const inUsdt = getTokenUsdtPrice(tokenInSymbol);
+    const outUsdt = getTokenUsdtPrice(tokenOutSymbol);
+
+    if (
+      !Number.isFinite(inUsdt) ||
+      inUsdt <= 0 ||
+      !Number.isFinite(outUsdt) ||
+      outUsdt <= 0
+    ) {
+      return "USD entry unavailable";
+    }
+
+    if (inUsdt <= outUsdt) {
+      quoteSymbol = tokenInSymbol;
+      baseSymbol = tokenOutSymbol;
+
+      quotePerBaseText = formatRawTokenRatio(
+        order.amountIn,
+        tokenInMeta,
+        order.minAmountOut,
+        tokenOutMeta,
+        12
+      );
+
+    } else {
+      quoteSymbol = tokenOutSymbol;
+      baseSymbol = tokenInSymbol;
+
+      quotePerBaseText = formatRawTokenRatio(
+        order.minAmountOut,
+        tokenOutMeta,
+        order.amountIn,
+        tokenInMeta,
+        12
+      );
+    }
   }
 
-  // Other pairs: show the normalized output per input rate.
-  const rate = formatRawTokenRatio(
-    order.minAmountOut,
-    tokenOutMeta,
-    order.amountIn,
-    tokenInMeta
-  );
+  const quotePerBase = Number(quotePerBaseText);
+  const quotePriceUsdt = getTokenUsdtPrice(quoteSymbol);
 
-  return `${rate} ${tokenOutSymbol} / ${tokenInSymbol}`;
+  if (
+    !Number.isFinite(quotePerBase) ||
+    quotePerBase <= 0 ||
+    !Number.isFinite(quotePriceUsdt) ||
+    quotePriceUsdt <= 0
+  ) {
+    return "USD entry unavailable";
+  }
+
+  const approximateUsdtPrice =
+    quotePerBase * quotePriceUsdt;
+
+  return (
+    ` ${formatUsdtEntryPrice(approximateUsdtPrice)} USDT / ` +
+    `${baseSymbol}`
+  );
 }
 
-async function loadMyOrders() {
+const ORDER_PAGE_SIZE = 10;
+const ORDER_EVENT_SCAN_CHUNK = 2000;
+
+let orderPaginationState = {
+  wallet: "",
+  pageIndex: 0,
+  events: [],
+  cursorBlock: null,
+  exhausted: false,
+  loading: false
+};
+
+function resetOrderPagination(wallet = walletAccount || "") {
+  orderPaginationState = {
+    wallet: String(wallet).toLowerCase(),
+    pageIndex: 0,
+    events: [],
+    cursorBlock: null,
+    exhausted: false,
+    loading: false
+  };
+}
+
+function ensureOrderPaginationElement() {
+  const body = $("orderRows");
+  if (!body) return null;
+
+  let element = $("ordersPagination");
+  if (element) return element;
+
+  const anchor = body.closest(".scroll") || body.parentElement;
+  if (!anchor) return null;
+
+  element = document.createElement("div");
+  element.id = "ordersPagination";
+  element.style.cssText = [
+    "display:flex",
+    "align-items:center",
+    "justify-content:space-between",
+    "gap:12px",
+    "flex-wrap:wrap",
+    "padding:12px 2px 2px",
+    "font-size:12px",
+    "color:var(--muted, #9aa4b2)"
+  ].join(";");
+
+  anchor.insertAdjacentElement("afterend", element);
+  return element;
+}
+
+function renderOrderPagination(hasPrevious, hasNext, count = 0, loading = false) {
+  const element = ensureOrderPaginationElement();
+  if (!element) return;
+
+  if (
+    !walletAccount ||
+    (!loading &&
+      count === 0 &&
+      orderPaginationState.events.length === 0 &&
+      orderPaginationState.exhausted)
+  ) {
+    element.hidden = true;
+    element.innerHTML = "";
+    return;
+  }
+
+  element.hidden = false;
+
+  const first = orderPaginationState.pageIndex * ORDER_PAGE_SIZE + 1;
+  const last = first + Math.max(0, count - 1);
+
+  const summary = loading
+    ? "Loading orders..."
+    : count
+      ? `Showing ${first}-${last}`
+      : "No orders on this page";
+
+  element.innerHTML = `
+    <span>${summary} | Page ${orderPaginationState.pageIndex + 1}</span>
+    <div style="display:flex;gap:8px">
+      <button type="button" class="btn" id="ordersPreviousPage"
+        ${!hasPrevious || loading ? "disabled" : ""}>Previous</button>
+      <button type="button" class="btn" id="ordersNextPage"
+        ${!hasNext || loading ? "disabled" : ""}>Next</button>
+    </div>
+  `;
+
+  const previous = $("ordersPreviousPage");
+  const next = $("ordersNextPage");
+
+  if (previous) {
+    previous.addEventListener("click", () => {
+      if (orderPaginationState.loading || orderPaginationState.pageIndex <= 0) return;
+
+      orderPaginationState.pageIndex -= 1;
+      void loadMyOrders(false);
+    });
+  }
+
+  if (next) {
+    next.addEventListener("click", () => {
+      if (orderPaginationState.loading) return;
+
+      orderPaginationState.pageIndex += 1;
+      void loadMyOrders(false);
+    });
+  }
+}
+
+async function ensureOrderEvents(requiredCount, sources) {
+  if (orderPaginationState.cursorBlock === null) {
+    orderPaginationState.cursorBlock = await rpc.getBlockNumber();
+  }
+
+  const deploymentBlocks = sources.map(source =>
+    Math.max(0, Math.floor(Number(source.config?.deploymentBlock || 0)))
+  );
+
+  const earliestDeploymentBlock = deploymentBlocks.length
+    ? Math.min(...deploymentBlocks)
+    : 0;
+
+  const ownerTopic = ethers.zeroPadValue(
+    ethers.getAddress(walletAccount),
+    32
+  );
+
+  while (
+    orderPaginationState.events.length < requiredCount &&
+    !orderPaginationState.exhausted
+  ) {
+    const toBlock = orderPaginationState.cursorBlock;
+
+    if (toBlock < earliestDeploymentBlock) {
+      orderPaginationState.exhausted = true;
+      break;
+    }
+
+    const fromBlock = Math.max(
+      earliestDeploymentBlock,
+      toBlock - ORDER_EVENT_SCAN_CHUNK + 1
+    );
+
+    const groups = await Promise.all(sources.map(async source => {
+      const deploymentBlock = Math.max(
+        0,
+        Math.floor(Number(source.config?.deploymentBlock || 0))
+      );
+
+      const queryFrom = Math.max(fromBlock, deploymentBlock);
+      if (queryFrom > toBlock) return [];
+
+      const iface = new ethers.Interface(source.abi);
+      const eventFragment = iface.getEvent("OrderCreated");
+
+      if (!eventFragment) {
+        throw new Error("OrderCreated event is missing from the Order Book ABI.");
+      }
+
+      const logs = await rpc.getLogs({
+        address: source.address,
+        topics: [eventFragment.topicHash, null, ownerTopic],
+        fromBlock: queryFrom,
+        toBlock
+      });
+
+      return logs.flatMap(log => {
+        try {
+          const parsed = iface.parseLog({
+            topics: log.topics,
+            data: log.data
+          });
+
+          if (!parsed || parsed.name !== "OrderCreated") return [];
+
+          return [{
+            source,
+            event: {
+              args: parsed.args,
+              blockNumber: Number(log.blockNumber),
+              index: Number(log.index ?? log.logIndex ?? 0),
+              transactionIndex: Number(log.transactionIndex ?? 0),
+              transactionHash: log.transactionHash
+            }
+          }];
+        } catch (error) {
+          console.warn("Could not decode OrderCreated event:", error);
+          return [];
+        }
+      });
+    }));
+
+    orderPaginationState.events.push(...groups.flat());
+
+    orderPaginationState.events.sort((a, b) =>
+      Number(b.event.blockNumber) - Number(a.event.blockNumber) ||
+      Number(b.event.transactionIndex || 0) - Number(a.event.transactionIndex || 0) ||
+      Number(b.event.index || 0) - Number(a.event.index || 0)
+    );
+
+    orderPaginationState.cursorBlock = fromBlock - 1;
+
+    if (fromBlock <= earliestDeploymentBlock) {
+      orderPaginationState.exhausted = true;
+    }
+  }
+}
+
+async function loadMyOrders(reset = false) {
   const body = $("orderRows");
 
   if (!walletAccount) {
+    resetOrderPagination("");
     body.innerHTML = `
       <tr><td colspan="6" class="empty">
         Connected QMSwap wallet not detected.
       </td></tr>
     `;
+    renderOrderPagination(false, false, 0);
     return;
   }
 
+  const walletKey = String(walletAccount).toLowerCase();
+
+  if (reset || orderPaginationState.wallet !== walletKey) {
+    resetOrderPagination(walletKey);
+  }
+
+  if (orderPaginationState.loading) return;
+  orderPaginationState.loading = true;
+
   body.innerHTML = `
     <tr><td colspan="6" class="empty">
-      Loading your V2 and V3 orders...
+      Loading the latest 10 orders...
     </td></tr>
   `;
+
+  renderOrderPagination(
+    orderPaginationState.pageIndex > 0,
+    false,
+    0,
+    true
+  );
 
   try {
     const sources = [];
@@ -2223,50 +3903,19 @@ async function loadMyOrders() {
       return;
     }
 
-    const eventGroups = await Promise.all(
-      sources.map(async (source) => {
-        try {
-          const book = new ethers.Contract(
-            source.address,
-            source.abi,
-            rpc
-          );
+    const offset = orderPaginationState.pageIndex * ORDER_PAGE_SIZE;
+    const requiredCount = offset + ORDER_PAGE_SIZE + 1;
 
-          const filter = book.filters.OrderCreated(
-            null,
-            walletAccount
-          );
+    await ensureOrderEvents(requiredCount, sources);
 
-          const fromBlock = Number(
-            source.config?.deploymentBlock || 0
-          );
-
-          const events = await book.queryFilter(
-            filter,
-            fromBlock,
-            "latest"
-          );
-
-          return events.map(event => ({
-            source,
-            event
-          }));
-        } catch (error) {
-          console.warn(
-            `${source.version.toUpperCase()} order query failed:`,
-            error
-          );
-          return [];
-        }
-      })
+    const records = orderPaginationState.events.slice(
+      offset,
+      offset + ORDER_PAGE_SIZE
     );
 
-    const records = eventGroups
-      .flat()
-      .sort((a, b) =>
-        Number(b.event.blockNumber) - Number(a.event.blockNumber)
-      )
-      .slice(0, 100);
+    const hasPrevious = orderPaginationState.pageIndex > 0;
+    const hasNext =
+      orderPaginationState.events.length > offset + ORDER_PAGE_SIZE;
 
     const heading = $("ordersHeading");
     const description = $("ordersDescription");
@@ -2274,7 +3923,7 @@ async function loadMyOrders() {
     if (heading) heading.textContent = "My Orders";
     if (description) {
       description.textContent =
-        "Orders created by your connected wallet.";
+        "Orders created by your connected QMSwap wallet.";
     }
 
     if (!records.length) {
@@ -2283,6 +3932,8 @@ async function loadMyOrders() {
           You have no limit orders yet.
         </td></tr>
       `;
+      orderPaginationState.exhausted = true;
+      renderOrderPagination(false, false, 0);
       return;
     }
 
@@ -2332,32 +3983,58 @@ async function loadMyOrders() {
         `;
       } else if (status === 1) {
         let executable = false;
+        let quoteOutRaw = null;
+        let quoteError = "";
 
         try {
           if (source.version === "v2" && legacyRouterRead) {
-            const quote = await legacyRouterRead.quoteOut(
+            quoteOutRaw = await legacyRouterRead.quoteOut(
               order.tokenIn,
               order.tokenOut,
               order.amountIn
             );
 
-            executable = quote >= order.minAmountOut;
-          } else if (source.version === "v3" && routerRead) {
-            const path = Array.from(order.path || []);
+            executable = quoteOutRaw >= order.minAmountOut;
 
-            if (path.length >= 2) {
+          } else if (source.version === "v3" && routerRead) {
+            const orderPath = Array.from(order.path || []);
+
+            if (orderPath.length >= 2) {
               const amounts = await routerRead.getAmountsOut(
                 order.amountIn,
-                path
+                orderPath
               );
 
-              executable =
-                amounts[amounts.length - 1] >= order.minAmountOut;
+              quoteOutRaw = amounts[amounts.length - 1];
+              executable = quoteOutRaw >= order.minAmountOut;
             }
           }
-        } catch {
+        } catch (error) {
+          quoteError =
+            error?.shortMessage ||
+            error?.reason ||
+            error?.message ||
+            String(error);
+
           executable = false;
         }
+
+        console.info("[QMSwap Limit Order Diagnostic]", {
+          version: source.version,
+          orderId: String(id),
+          tokenIn: order.tokenIn,
+          tokenOut: order.tokenOut,
+          path: Array.from(order.path || []),
+          amountInRaw: String(order.amountIn),
+          quoteOutRaw:
+            quoteOutRaw === null ? null : String(quoteOutRaw),
+          minAmountOutRaw: String(order.minAmountOut),
+          tokenOutSymbol,
+          tokenOutDecimals: tokenOutMeta.decimals,
+          executable,
+          routerReadAvailable: Boolean(routerRead),
+          error: quoteError || null
+        });
 
         action = `
           <div style="display:flex;gap:5px;flex-wrap:wrap">
@@ -2383,7 +4060,7 @@ async function loadMyOrders() {
         ? Array.from(order.path)
             .map(address => symbolForAddress(address))
             .join("  ")
-        : `${tokenInSymbol}  ${tokenOutSymbol}`;
+        : "Legacy direct route";
 
       return `
         <tr>
@@ -2411,6 +4088,7 @@ async function loadMyOrders() {
     }));
 
     body.innerHTML = rows.join("");
+    renderOrderPagination(hasPrevious, hasNext, records.length);
   } catch (error) {
     console.error("My Orders loading failed:", error);
 
@@ -2420,6 +4098,9 @@ async function loadMyOrders() {
         ${esc(error?.shortMessage || error?.message || "RPC error")}
       </td></tr>
     `;
+    renderOrderPagination(orderPaginationState.pageIndex > 0, false, 0);
+  } finally {
+    orderPaginationState.loading = false;
   }
 }
 
@@ -2458,7 +4139,7 @@ async function handleOrderAction(action, id, version = "v3") {
   }
 
   setOrderStatus(
-    `${version.toUpperCase()}Transaction submitted: ${compactAddress(tx.hash)}`,
+    `${version.toUpperCase()} transaction submitted: ${compactAddress(tx.hash)}`,
     "warn"
   );
 
@@ -2466,7 +4147,10 @@ async function handleOrderAction(action, id, version = "v3") {
 
   setOrderStatus("Order transaction confirmed.", "success");
 
-  await loadMyOrders();
+  void loadMyOrders().catch(error => {
+    console.warn("Order history load failed:", error);
+  });
+
   await refreshMarket();
 }
 
@@ -2509,7 +4193,7 @@ $("refreshOrdersBtn").addEventListener("click", async () => {
     button.disabled = true;
 
     try {
-      await loadMyOrders();
+      await loadMyOrders(true);
     } finally {
       button.disabled = false;
     }
@@ -2546,6 +4230,7 @@ export async function onWalletChanged(nextAccount, nextSigner) {
 
 export async function initMarket(context) {
   marketContext = context;
+  enforceUsdtQuoteOnly();
 
   walletAccount = context?.getAccount?.() || "";
   walletSigner = context?.getSigner?.() || null;
@@ -2561,13 +4246,20 @@ export async function initMarket(context) {
   marketHistoryWindow = null;
 
   bindLimitOrderUI();
-  await loadOrderBookDeployment();
 
-  document.querySelectorAll("[data-quote]").forEach((button) => {
-    button.addEventListener("click", () => {
-      selectQuote(button.dataset.quote);
+  // Discover Order Books in the background so Market prices and the chart
+  // can render without waiting for extra contract/code checks.
+  void loadOrderBookDeployment()
+    .then(() => {
+      if (walletAccount) {
+        void loadMyOrders().catch(error => {
+          console.warn("Order history load after deployment discovery failed:", error);
+        });
+      }
+    })
+    .catch(error => {
+      console.warn("Order Book discovery failed:", error);
     });
-  });
 
   $("tokenRows").addEventListener("click", async (event) => {
     const row = event.target.closest?.("[data-token-symbol]");
@@ -2604,13 +4296,24 @@ export async function initMarket(context) {
 
   $("refreshBtn").addEventListener("click", refreshMarket);
 
-  await loadMyOrders();
+  void loadMyOrders().catch(error => {
+    console.warn("Order history load failed:", error);
+  });
+
   await refreshMarket();
 
   if (marketRefreshTimer !== null) {
     clearInterval(marketRefreshTimer);
   }
 
-  marketRefreshTimer = setInterval(refreshMarket, 60000);
+  marketRefreshTimer = setInterval(async () => {
+    await refreshMarket();
+
+    if (walletAccount && (orderBookAddress || legacyOrderBookAddress)) {
+      void loadMyOrders().catch(error => {
+        console.warn("Periodic order-state refresh failed:", error);
+      });
+    }
+  }, 60000);
 }
 
