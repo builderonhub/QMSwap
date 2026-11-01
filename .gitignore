@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 .env
 artifacts/
 cache/
@@ -41,3 +41,4 @@ repair-qmswap-english.mjs
 translate-qmswap-english.mjs
 
 /scripts/
+!frontend/deployments/qmswap-limit-order-v3.json
