@@ -1,0 +1,12 @@
+{
+  "version": "limit-order-v1",
+  "contractName": "QMSwapLimitOrderBookV1",
+  "chainId": 19480,
+  "address": "0x4Ab6D20d0E5F8254294047bf58e4Ab1721B41D08",
+  "router": "0xEbe7a5d4eD495A5B67C4d9d887a63e6207f32FA0",
+  "wrappedNative": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+  "deployer": "0xde0E761Fd75E568814af15331A4a62EC3E559e79",
+  "deploymentBlock": 244220,
+  "transactionHash": "0xd9ce915174baaa437ce91de7884241e67ca7df2c9cb34ecb179e1be707f5a2d9",
+  "deployedAt": "2026-10-31T06:53:15.946Z"
+}

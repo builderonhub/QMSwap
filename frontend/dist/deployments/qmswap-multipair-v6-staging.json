@@ -1,0 +1,454 @@
+{
+  "chainId": 19480,
+  "deployer": "0xde0E761Fd75E568814af15331A4a62EC3E559e79",
+  "factory": "0x7E51ADdc876574A75D53a3fa5ccb7b6d2d9b4f6c",
+  "router": "0xEbe7a5d4eD495A5B67C4d9d887a63e6207f32FA0",
+  "tokens": {
+    "USDT": {
+      "address": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
+      "nonce": 320,
+      "state": "confirmed",
+      "startedAt": "2026-10-29T09:12:56.183Z",
+      "txHash": "0x480cd78bb6fa0a4c1fe039d3931ffd14dba4a5a48a749a8081602fdea9b8400b",
+      "confirmedBlock": 229937
+    },
+    "USDC": {
+      "address": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
+      "nonce": 321,
+      "state": "confirmed",
+      "startedAt": "2026-10-29T09:13:14.305Z",
+      "txHash": "0x53793936232bb850d5ddbbfc6c26dc1b1a684d3cf9f0fa3b023faf139e62c211",
+      "confirmedBlock": 229939
+    },
+    "ETH": {
+      "address": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
+      "nonce": 322,
+      "state": "confirmed",
+      "startedAt": "2026-10-29T09:13:28.620Z",
+      "txHash": "0xea3a0128b3a87740dfb8ed0cf342f388cacafed7b06f711f45598ce6e3739e20",
+      "confirmedBlock": 229940
+    },
+    "BTC": {
+      "address": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
+      "nonce": 323,
+      "state": "confirmed",
+      "startedAt": "2026-10-29T09:13:48.619Z",
+      "txHash": "0xcdc37746b4b488da2b6a96f3a4c71ca12b36983424a6681fc9235f50f7c04d55",
+      "confirmedBlock": 229941
+    },
+    "BNB": {
+      "address": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
+      "nonce": 324,
+      "state": "confirmed",
+      "startedAt": "2026-10-29T09:14:06.574Z",
+      "txHash": "0x516abb78200e3435082fa03815bd2422159c1c75475d3d18ba48bb81ff900332",
+      "confirmedBlock": 229943
+    }
+  },
+  "pairs": {
+    "QMS/USDT": {
+      "address": "0x5Bad5A224DafB8B13c107bb875531A869Cff1257",
+      "tokenA": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+      "tokenB": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
+      "txHash": "0xf7a9be4ee53bda81e0418b23b2195d2dc85ac31dd93698c46a8842727ed2eb95",
+      "state": "confirmed",
+      "confirmedBlock": 229944
+    },
+    "QMS/USDC": {
+      "address": "0x7C9E28ce225240fD890629db0e03868bd9e03Bf5",
+      "tokenA": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+      "tokenB": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
+      "txHash": "0xf25eeed00273e35e525720483ea808a7d51d87cd0482259b91a3d70a835af867",
+      "state": "confirmed",
+      "confirmedBlock": 229946
+    },
+    "QMS/ETH": {
+      "address": "0xbd8396bcAF9c5F1D8f87dC1Bba280e89B23657B2",
+      "tokenA": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+      "tokenB": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
+      "txHash": "0xf1720d8f37294a74213ab8781d9d89a9d19f4c07be5128e027b5586c279eabd7",
+      "state": "confirmed",
+      "confirmedBlock": 229948
+    },
+    "QMS/BTC": {
+      "address": "0xb7e9ef48d19e25023aEEAf62c47F87b935247195",
+      "tokenA": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+      "tokenB": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
+      "txHash": "0x33dc47f23588c735f89bd24485234afdf52413d4bdbe0aff1d6ba4adae73e269",
+      "state": "confirmed",
+      "confirmedBlock": 229949
+    },
+    "QMS/BNB": {
+      "address": "0x76567a663eE8c9Caf6cfA67ca948521e2D88B036",
+      "tokenA": "0xB0726bAe50E3D5D86556A6477CeE254d36641D35",
+      "tokenB": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
+      "txHash": "0x78b88c9c2252235a43446bfe625ba9e541a886d89dcbaca9eff404b1fdebd3e2",
+      "state": "confirmed",
+      "confirmedBlock": 229952
+    },
+    "USDT/USDC": {
+      "address": "0x4f13813D651b962a1C21EE7bd8D10fA35bcE2c63",
+      "tokenA": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
+      "tokenB": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
+      "txHash": "0x3cba0e890018fe1a6490c90e1cf78dd690f6888f5ed76704b6303c06c0bc70b3",
+      "state": "confirmed",
+      "confirmedBlock": 229955
+    },
+    "USDT/ETH": {
+      "address": "0x81f24aE4901c9A3017A60da52E175971b0D49D8F",
+      "tokenA": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
+      "tokenB": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
+      "txHash": "0x86e037492ec6259855c7a46f042500ff11ee013d8f128f0f5514059bb25bfabd",
+      "state": "confirmed",
+      "confirmedBlock": 229959
+    },
+    "USDT/BTC": {
+      "address": "0x94c2c79213184E464447313a20BF4F9C07f526B8",
+      "tokenA": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
+      "tokenB": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
+      "txHash": "0x8abc9b2945c776593e287e9a3b8aa207c3e1b01535245a0fbcb4ca353bab3bab",
+      "state": "confirmed",
+      "confirmedBlock": 229962
+    },
+    "USDT/BNB": {
+      "address": "0x0865F61e9f0C8aBf156009aec13DB88f402ebcd6",
+      "tokenA": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
+      "tokenB": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
+      "txHash": "0x2b1071c578aa22054568b0d053e9ee9bac17438def6e231cd0e4a9fddffd2268",
+      "state": "confirmed",
+      "confirmedBlock": 229964
+    },
+    "USDC/ETH": {
+      "address": "0xAA4A82b7939dDb00687F0843b19A4CF95316C81d",
+      "tokenA": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
+      "tokenB": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
+      "txHash": "0xdbe7e96ff517ed1a2387877820ff36b0164a3dde76216243b0eb2a39d837192a",
+      "state": "confirmed",
+      "confirmedBlock": 229965
+    },
+    "USDC/BTC": {
+      "address": "0x93881C2F23B9bAD5DB180Bdb4d55B7fE94e314DD",
+      "tokenA": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
+      "tokenB": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
+      "txHash": "0x9d32788f242dc9e2e1a977b783ddd9773241132b010760442a2b26e581b1f823",
+      "state": "confirmed",
+      "confirmedBlock": 229967
+    },
+    "USDC/BNB": {
+      "address": "0x048C0b5D581c883Ac27Fa1689453E2A8043eE3CB",
+      "tokenA": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
+      "tokenB": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
+      "txHash": "0x8ec644c77f709fd11e1531e6d5b4ff8cf3eeccdeed733e80848a4edfd7757288",
+      "state": "confirmed",
+      "confirmedBlock": 229969
+    },
+    "ETH/BTC": {
+      "address": "0xFE60f9Ff765D2c43ddABd885bC6bD4C8267a7454",
+      "tokenA": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
+      "tokenB": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
+      "txHash": "0xc5ff39ebea9d4d62ffc49b8dc37d9ddc2e5d37a027da4ceec13b4beb33cdb41b",
+      "state": "confirmed",
+      "confirmedBlock": 229970
+    },
+    "ETH/BNB": {
+      "address": "0x331CaC9DD84CF919B40c5aCC7cd95B69a63e3c58",
+      "tokenA": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
+      "tokenB": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
+      "txHash": "0x9cb00324e5106c3e532f40a3be244d01fc09d5fa807b25eeee2ee6175756fded",
+      "state": "confirmed",
+      "confirmedBlock": 229972
+    },
+    "BTC/BNB": {
+      "address": "0x89e9fE0b01c53AeA67eE39E839674D38A4ebc49B",
+      "tokenA": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
+      "tokenB": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
+      "txHash": "0x9104570e5b1e7849350e2e4f5d591678a6fdb6caea67f15449f90f9369fcfc3d",
+      "state": "confirmed",
+      "confirmedBlock": 229974
+    }
+  },
+  "seedPrices": {
+    "QMS": "100000000",
+    "USDT": "100000000",
+    "USDC": "100000000",
+    "ETH": "232460000000",
+    "BTC": "8029000000000",
+    "BNB": "75318000000"
+  },
+  "liquidityPlan": [
+    {
+      "label": "USDT/USDC",
+      "kind": "erc20",
+      "a": "USDT",
+      "b": "USDC",
+      "amountA": "500000000000000",
+      "amountB": "500000000000000"
+    },
+    {
+      "label": "USDT/ETH",
+      "kind": "erc20",
+      "a": "USDT",
+      "b": "ETH",
+      "amountA": "581150000000000000",
+      "amountB": "250000000000000000000000000"
+    },
+    {
+      "label": "USDC/ETH",
+      "kind": "erc20",
+      "a": "USDC",
+      "b": "ETH",
+      "amountA": "581150000000000000",
+      "amountB": "250000000000000000000000000"
+    },
+    {
+      "label": "USDT/BTC",
+      "kind": "erc20",
+      "a": "USDT",
+      "b": "BTC",
+      "amountA": "20072500000000000000",
+      "amountB": "25000000000000000"
+    },
+    {
+      "label": "USDC/BTC",
+      "kind": "erc20",
+      "a": "USDC",
+      "b": "BTC",
+      "amountA": "20072500000000000000",
+      "amountB": "25000000000000000"
+    },
+    {
+      "label": "USDT/BNB",
+      "kind": "erc20",
+      "a": "USDT",
+      "b": "BNB",
+      "amountA": "188295000000000000",
+      "amountB": "250000000000000000000000000"
+    },
+    {
+      "label": "USDC/BNB",
+      "kind": "erc20",
+      "a": "USDC",
+      "b": "BNB",
+      "amountA": "188295000000000000",
+      "amountB": "250000000000000000000000000"
+    },
+    {
+      "label": "ETH/BTC",
+      "kind": "erc20",
+      "a": "ETH",
+      "b": "BTC",
+      "amountA": "43018153660844876537898",
+      "amountB": "124548511645"
+    },
+    {
+      "label": "ETH/BNB",
+      "kind": "erc20",
+      "a": "ETH",
+      "b": "BNB",
+      "amountA": "43018153660844876537898",
+      "amountB": "132770386892907405932180"
+    },
+    {
+      "label": "BTC/BNB",
+      "kind": "erc20",
+      "a": "BTC",
+      "b": "BNB",
+      "amountA": "124548511645",
+      "amountB": "132770386892907405932180"
+    },
+    {
+      "label": "QMS/USDT",
+      "kind": "native",
+      "a": "QMS",
+      "b": "USDT",
+      "amountA": "1000000000000000000",
+      "amountB": "1000000"
+    },
+    {
+      "label": "QMS/USDC",
+      "kind": "native",
+      "a": "QMS",
+      "b": "USDC",
+      "amountA": "1000000000000000000",
+      "amountB": "1000000"
+    },
+    {
+      "label": "QMS/ETH",
+      "kind": "native",
+      "a": "QMS",
+      "b": "ETH",
+      "amountA": "1000000000000000000",
+      "amountB": "430181536608448"
+    },
+    {
+      "label": "QMS/BTC",
+      "kind": "native",
+      "a": "QMS",
+      "b": "BTC",
+      "amountA": "1000000000000000000",
+      "amountB": "1245"
+    },
+    {
+      "label": "QMS/BNB",
+      "kind": "native",
+      "a": "QMS",
+      "b": "BNB",
+      "amountA": "1000000000000000000",
+      "amountB": "1327703868929074"
+    }
+  ],
+  "seedLiquidity": {
+    "USDT/USDC": {
+      "pairAddress": "0x4f13813D651b962a1C21EE7bd8D10fA35bcE2c63",
+      "amountA": "500000000000000",
+      "amountB": "500000000000000",
+      "txHash": "0x61c735ee4fd806705a0600591552007a564e03752e1f22e7813e1c564a901581",
+      "state": "confirmed",
+      "confirmedBlock": 229991
+    },
+    "USDT/ETH": {
+      "pairAddress": "0x81f24aE4901c9A3017A60da52E175971b0D49D8F",
+      "amountA": "581150000000000000",
+      "amountB": "250000000000000000000000000",
+      "txHash": "0x789e8b7fe1e9f7378e54807e7e52c2be97ab5a93093fc3ea7c4b37c45f8044b0",
+      "state": "confirmed",
+      "confirmedBlock": 229995
+    },
+    "USDC/ETH": {
+      "pairAddress": "0xAA4A82b7939dDb00687F0843b19A4CF95316C81d",
+      "amountA": "581150000000000000",
+      "amountB": "250000000000000000000000000",
+      "txHash": "0x986a7d5c17b63cb4a53df798b1badb6ef100fb03db2688cc08668d8a4baea4fb",
+      "state": "confirmed",
+      "confirmedBlock": 229998
+    },
+    "USDT/BTC": {
+      "pairAddress": "0x94c2c79213184E464447313a20BF4F9C07f526B8",
+      "amountA": "20072500000000000000",
+      "amountB": "25000000000000000",
+      "txHash": "0xe2e0556b978cdcd87e835839bcdf1ff2193438ec1f1fc5b944c66f435e0871b5",
+      "state": "confirmed",
+      "confirmedBlock": 230000
+    },
+    "USDC/BTC": {
+      "pairAddress": "0x93881C2F23B9bAD5DB180Bdb4d55B7fE94e314DD",
+      "amountA": "20072500000000000000",
+      "amountB": "25000000000000000",
+      "txHash": "0xe7f7a8e4fbe0e1fda090e88677b787a8141e705368ca5953a20d66a802767eed",
+      "state": "confirmed",
+      "confirmedBlock": 230003
+    },
+    "USDT/BNB": {
+      "pairAddress": "0x0865F61e9f0C8aBf156009aec13DB88f402ebcd6",
+      "amountA": "188295000000000000",
+      "amountB": "250000000000000000000000000",
+      "txHash": "0x56f17486e5a492004c0ba51f41b428d9f8a8966b623c0fa7398f83e02058d34b",
+      "state": "confirmed",
+      "confirmedBlock": 230005
+    },
+    "USDC/BNB": {
+      "pairAddress": "0x048C0b5D581c883Ac27Fa1689453E2A8043eE3CB",
+      "amountA": "188295000000000000",
+      "amountB": "250000000000000000000000000",
+      "txHash": "0xcb75eccb0332276ee6bec1e07950398b0701aca9a9cb44cc068681897bd86524",
+      "state": "confirmed",
+      "confirmedBlock": 230007
+    },
+    "ETH/BTC": {
+      "pairAddress": "0xFE60f9Ff765D2c43ddABd885bC6bD4C8267a7454",
+      "amountA": "43018153660844876537898",
+      "amountB": "124548511645",
+      "txHash": "0x6c30faabb115bda634a2ea2fe45b51453da1c7b90acb0505de24b16bab692847",
+      "state": "confirmed",
+      "confirmedBlock": 230008
+    },
+    "ETH/BNB": {
+      "pairAddress": "0x331CaC9DD84CF919B40c5aCC7cd95B69a63e3c58",
+      "amountA": "43018153660844876537898",
+      "amountB": "132770386892907405932180",
+      "txHash": "0x3296e153cb79f9792c74c46833cb67a4a1d7986b787f85fba2114a6110d46f6f",
+      "state": "confirmed",
+      "confirmedBlock": 230010
+    },
+    "BTC/BNB": {
+      "pairAddress": "0x89e9fE0b01c53AeA67eE39E839674D38A4ebc49B",
+      "amountA": "124548511645",
+      "amountB": "132770386892907405932180",
+      "txHash": "0xe01a80cacfafad2d772bc6561bedbc2dac3b3a9645f2c387ebc650074b0ada2e",
+      "state": "confirmed",
+      "confirmedBlock": 230012
+    },
+    "QMS/USDT": {
+      "pairAddress": "0x5Bad5A224DafB8B13c107bb875531A869Cff1257",
+      "amountA": "1000000000000000000",
+      "amountB": "1000000",
+      "txHash": "0x97b50529522533a7009c35775f062386e1681777628be8ac684fe4d100c4fdb5",
+      "state": "confirmed",
+      "confirmedBlock": 230014
+    },
+    "QMS/USDC": {
+      "pairAddress": "0x7C9E28ce225240fD890629db0e03868bd9e03Bf5",
+      "amountA": "1000000000000000000",
+      "amountB": "1000000",
+      "txHash": "0x1bcf66a1819ec41173d35de917dd24efc361edfeeee074dcfdbf2f736260b18c",
+      "state": "confirmed",
+      "confirmedBlock": 230016
+    },
+    "QMS/ETH": {
+      "pairAddress": "0xbd8396bcAF9c5F1D8f87dC1Bba280e89B23657B2",
+      "amountA": "1000000000000000000",
+      "amountB": "430181536608448",
+      "txHash": "0x030c25f7f3ba4291268f6f5ad86c74bdbdd63b442df65e491d279f6d8ccdd154",
+      "state": "confirmed",
+      "confirmedBlock": 230017
+    },
+    "QMS/BTC": {
+      "pairAddress": "0xb7e9ef48d19e25023aEEAf62c47F87b935247195",
+      "amountA": "1000000000000000000",
+      "amountB": "1245",
+      "txHash": "0x43d21732954ede2847935b674dc1c41067ffa9d2ac0d9cdf59abb53c54599ef2",
+      "state": "confirmed",
+      "confirmedBlock": 230018
+    },
+    "QMS/BNB": {
+      "pairAddress": "0x76567a663eE8c9Caf6cfA67ca948521e2D88B036",
+      "amountA": "1000000000000000000",
+      "amountB": "1327703868929074",
+      "txHash": "0xe171e01c6dd8d8a3d7a4599701e2a602e46b8824c91ab1687d95d98ff3aabe94",
+      "state": "confirmed",
+      "confirmedBlock": 230020
+    }
+  },
+  "seedMint": {
+    "USDT": {
+      "amount": "20841945000001000000",
+      "txHash": "0xf395399afeca1a297b6a7e0ffa43f1f81ebbd1641ffc14520d53cc795dcfb719",
+      "state": "confirmed",
+      "submittedAt": "2026-10-29T09:21:23.802Z"
+    },
+    "USDC": {
+      "amount": "20841945000001000000",
+      "txHash": "0xac7f1a7514d7e01799962a3b55008a9fa91cfa82b976cdcb5bbfcd71fdba93ce",
+      "state": "confirmed",
+      "submittedAt": "2026-10-29T09:21:33.566Z"
+    },
+    "ETH": {
+      "amount": "495086036307751871289684244",
+      "txHash": "0x562f81daf866a933eb3a0dc45bae7f822c40caa3f401f7b1e5ddf8121ee0eb35",
+      "state": "confirmed",
+      "submittedAt": "2026-10-29T09:21:41.898Z"
+    },
+    "BTC": {
+      "amount": "49950249097024535",
+      "txHash": "0x443a26dd72a0c6905382e09aee0466571b2f6992ac144d26264649aa38e053bb",
+      "state": "confirmed",
+      "submittedAt": "2026-10-29T09:22:30.814Z"
+    },
+    "BNB": {
+      "amount": "450265540775113518680793434",
+      "txHash": "0x96e1dacb4e8d7f3d31b22652f7342eefde5c1f72345978d550ee974ad7b18c69",
+      "state": "confirmed",
+      "submittedAt": "2026-10-29T09:22:50.128Z"
+    }
+  }
+}
