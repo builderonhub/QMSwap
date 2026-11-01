@@ -1916,7 +1916,7 @@ async function loadOrderBookDeployment() {
     orderBookConfig = data;
 
     setOrderStatus(
-      `QWAP V3 Order Book connected: ${compactAddress(address)}.`,
+      `Limit Order service connected.`,
       "success"
     );
   } catch (error) {
@@ -2389,7 +2389,7 @@ async function loadMyOrders() {
         <tr>
           <td>
             <div class="asset-name">
-              #${id.toString()}  ${source.version.toUpperCase()}
+              #${id.toString()}
             </div>
           </td>
           <td>
