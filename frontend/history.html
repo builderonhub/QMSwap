@@ -196,7 +196,34 @@
       line-height: 1.8;
     }
     footer { padding-top: 28px; color: var(--muted); font-size: 11px; text-align: center; }
-    @media (max-width: 850px) {
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat-card {
+      min-width: 0;
+      padding: 17px 18px;
+    }
+    .stat-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .stat-value {
+      margin-top: 9px;
+      font-size: clamp(19px, 2.5vw, 27px);
+      font-weight: 800;
+      letter-spacing: -.6px;
+      overflow-wrap: anywhere;
+    }
+    .stat-note {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+@media (max-width: 850px) {
       .wrap { width: min(100% - 24px, 1320px); }
       .topbar { padding: 12px 0; }
       nav { width: 100%; order: 3; }
@@ -225,6 +252,7 @@
       <a href="/liquidity.html">Add Liquidity</a>
       <a href="/faucet.html">Faucet</a>
       <a href="/portfolio.html">Portfolio</a>
+      <a href="/market.html" data-page="market">Market</a>
       <a href="/history.html" class="active">History</a>
     </nav>
     <div class="actions top-actions">
@@ -237,7 +265,7 @@
 <main class="wrap">
   <section class="intro">
     <div>
-      <div class="eyebrow">Wallet Activity</div>
+      <div class="eyebrow">Wallet Overview</div>
       <h1>Transaction History</h1>
       <div class="sub">
         Review transactions, token transfers and internal transactions for the selected wallet on QMS Testnet.
@@ -260,7 +288,39 @@
 
   <div id="status" class="status" role="status">Connect your wallet to load its activity.</div>
 
-  <div class="tabs" role="tablist" aria-label="Activity type">
+  <section class="stats" id="tradeAnalytics" hidden>
+    <article class="card stat-card">
+      <div class="stat-label">Total Transactions</div>
+      <div class="stat-value" id="statTotalTransactions">--</div>
+      <div class="stat-note" id="statTransactionNote">QMSScan address counter</div>
+    </article>
+
+    <article class="card stat-card">
+      <div class="stat-label">Contracts Interacted</div>
+      <div class="stat-value" id="statContractsInteracted">--</div>
+      <div class="stat-note" id="statContractsNote">Unique contracts called or created</div>
+    </article>
+
+    <article class="card stat-card">
+      <div class="stat-label">Token Contracts Held</div>
+      <div class="stat-value" id="statTokenContractsHeld">--</div>
+      <div class="stat-note" id="statTokenContractsNote">Positive ERC-20 balances</div>
+    </article>
+
+    <article class="card stat-card">
+      <div class="stat-label">Total Gas Spent</div>
+      <div class="stat-value" id="statGasSpent">--</div>
+      <div class="stat-note" id="statGasNote">Outgoing transaction fees in QMS</div>
+    </article>
+
+    <article class="card stat-card">
+      <div class="stat-label">Wallet Age</div>
+      <div class="stat-value" id="statWalletAge">--</div>
+      <div class="stat-note" id="statWalletAgeNote">From first on-chain activity</div>
+    </article>
+  </section>
+
+<div class="tabs" role="tablist" aria-label="Activity type">
     <button class="tab active" data-tab="transactions" role="tab" aria-selected="true">Transactions</button>
     <button class="tab" data-tab="token-transfers" role="tab" aria-selected="false">Token Transfers</button>
     <button class="tab" data-tab="internal-transactions" role="tab" aria-selected="false">Internal Transactions</button>
@@ -274,6 +334,13 @@
       </div>
       <div class="tools">
         <input id="searchInput" type="search" placeholder="Search hash, address, method or token...">
+        <input id="importSwapHash"
+               type="text"
+               spellcheck="false"
+               autocomplete="off"
+               placeholder="Paste past swap transaction hash"
+               aria-label="Historical swap transaction hash">
+        <button id="importSwapBtn" type="button">Import Past Swap</button>
         <select id="directionFilter" aria-label="Direction filter">
           <option value="all">All Directions</option>
           <option value="sent">Sent</option>
@@ -284,6 +351,13 @@
           <option value="success">Success</option>
           <option value="failed">Failed</option>
           <option value="pending">Pending</option>
+        </select>
+        <select id="timeFilter" aria-label="Time range">
+          <option value="0">All Time</option>
+          <option value="86400000">Last 24 Hours</option>
+          <option value="604800000">Last 7 Days</option>
+          <option value="2592000000">Last 30 Days</option>
+          <option value="7776000000">Last 90 Days</option>
         </select>
         <button id="exportBtn">Export CSV</button>
       </div>
@@ -321,6 +395,6 @@
   <footer>QMSwap · Transaction History · QMS Testnet</footer>
 </main>
 
-<script src="./history.js?build=20261016a"></script>
+<script src="./history.js?build=20261030-p26"></script>
 </body>
 </html>

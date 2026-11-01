@@ -172,6 +172,10 @@
     .priced { color: var(--green); font-size: 11px; }
     .error-text { color: var(--red); font-size: 11px; white-space: normal; }
     .empty { padding: 40px; color: var(--muted); text-align: center; }
+    .lp-summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+    .lp-total { color: var(--green); font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .lp-table { min-width: 1020px; }
+    .lp-underlying { line-height: 1.7; white-space: nowrap; }
     .note {
       margin-top: 15px;
       padding: 15px;
@@ -210,6 +214,7 @@
       <a href="/liquidity.html" data-page="liquidity">Add Liquidity</a>
       <a href="/faucet.html" data-page="faucet">Faucet</a>
       <a href="/portfolio.html" class="active" data-page="portfolio">Portfolio</a>
+      <a href="/market.html" data-page="market">Market</a>
       <a href="/history.html" data-page="history">History</a>
     </nav>
     <div class="top-actions">
@@ -291,17 +296,47 @@
     </div>
   </section>
 
+  <section class="card table-card" style="margin-top:17px">
+    <div class="table-head">
+      <div>
+        <h2>Liquidity Positions</h2>
+        <div class="stat-note"><span id="lpPositionCount">0</span> active LP positions across QMSwap V6 and QWAP</div>
+      </div>
+      <div class="lp-summary">
+        <span class="stat-note">Estimated LP value</span>
+        <span class="lp-total" id="lpTotalValue">— USDC</span>
+      </div>
+    </div>
+    <div class="scroll">
+      <table class="lp-table">
+        <thead>
+          <tr>
+            <th>Pool / Contract</th>
+            <th class="number">LP Balance / Share</th>
+            <th>Underlying Assets Owned</th>
+            <th class="number">Est. Value</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="lpRows">
+          <tr><td colspan="5" class="empty">Connect your wallet to view LP positions.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <div class="note">
     <strong>Note:</strong> This portfolio runs on testnet. Estimated USDC values are derived
     from on-chain quotes and are not fiat market valuations or withdrawable cash values.
-    Tokens without a valid quote are excluded from the total. QMSwap and QWAP tokens with
-    the same symbol may be different contracts.
+    Tokens without a valid quote are excluded from the total. LP values are estimated from
+    your share of each pool's underlying reserves. QMSwap and QWAP tokens with the same symbol
+    may be different contracts. Wallet balances and LP positions are counted separately.
     <br>Last updated: <span id="updatedAt">Not updated</span>.
   </div>
 
   <footer>QMSwap · Wallet Portfolio · QMS Testnet</footer>
 </main>
 
-<script type="module" src="./portfolio.js?build=20261016a"></script>
+<script type="module" src="./portfolio.js?build=20261030-p27"></script>
 </body>
 </html>

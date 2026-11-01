@@ -311,6 +311,43 @@ contract QMSwapMultiPairV3 {
         emit Swap(msg.sender, tokenIn, amountIn, amountOut, recipient);
     }
 
+    function removeLiquidity(
+        uint256 liquidity,
+        uint256 amount0Min,
+        uint256 amount1Min,
+        address recipient
+    ) external onlyRouter lock returns (uint256 amount0, uint256 amount1) {
+        require(recipient != address(0), "BAD_RECIPIENT");
+        require(liquidity > 0, "BAD_LIQUIDITY");
+
+        uint256 supply = totalSupply;
+        require(supply > 0, "NO_LIQUIDITY");
+        require(balanceOf[address(this)] >= liquidity, "INSUFFICIENT_LP_BALANCE");
+
+        amount0 = liquidity * reserve0 / supply;
+        amount1 = liquidity * reserve1 / supply;
+
+        require(
+            amount0 > 0 && amount1 > 0,
+            "INSUFFICIENT_LIQUIDITY_BURNED"
+        );
+        require(
+            amount0 >= amount0Min && amount1 >= amount1Min,
+            "INSUFFICIENT_AMOUNT"
+        );
+
+        unchecked {
+            balanceOf[address(this)] -= liquidity;
+            totalSupply -= liquidity;
+        }
+
+        emit Transfer(address(this), address(0), liquidity);
+
+        _safeTransfer(token0, recipient, amount0);
+        _safeTransfer(token1, recipient, amount1);
+
+        _sync();
+    }
     function _sync() internal {
         reserve0 = IQMSV3ERC20(token0).balanceOf(address(this));
         reserve1 = IQMSV3ERC20(token1).balanceOf(address(this));
@@ -430,6 +467,7 @@ contract QMSwapMultiRouterV3 {
     bool private entered;
 
     event LiquidityAdded(address indexed provider, address indexed tokenA, address indexed tokenB, uint256 amountA, uint256 amountB, uint256 shares);
+    event LiquidityRemoved(address indexed provider, address indexed tokenA, address indexed tokenB, uint256 liquidity, uint256 amountA, uint256 amountB, address recipient);
     event SwapExecuted(address indexed trader, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut, address recipient);
 
     modifier nonReentrant() {
@@ -552,6 +590,144 @@ contract QMSwapMultiRouterV3 {
         emit LiquidityAdded(msg.sender, wrappedNative, token, msg.value, tokenAmount, shares);
     }
 
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        uint256 deadline,
+        address recipient
+    ) external nonReentrant beforeDeadline(deadline)
+        returns (uint256, uint256)
+    {
+        require(tokenA != tokenB && liquidity > 0, "BAD_AMOUNT");
+        require(recipient != address(0), "BAD_RECIPIENT");
+
+        return _removeLiquidityInternal(
+            tokenA,
+            tokenB,
+            liquidity,
+            amountAMin,
+            amountBMin,
+            recipient
+        );
+    }
+
+    function _removeLiquidityInternal(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address recipient
+    ) internal returns (uint256 amountA, uint256 amountB) {
+        address pairAddress = _pair(tokenA, tokenB);
+        bool tokenAIs0 = QMSwapMultiPairV3(pairAddress).token0() == tokenA;
+
+        require(
+            QMSwapMultiPairV3(pairAddress).transferFrom(
+                msg.sender,
+                pairAddress,
+                liquidity
+            ),
+            "LP_TRANSFER_FAILED"
+        );
+
+        if (tokenAIs0) {
+            (amountA, amountB) = QMSwapMultiPairV3(pairAddress).removeLiquidity(
+                liquidity,
+                amountAMin,
+                amountBMin,
+                recipient
+            );
+        } else {
+            (amountB, amountA) = QMSwapMultiPairV3(pairAddress).removeLiquidity(
+                liquidity,
+                amountBMin,
+                amountAMin,
+                recipient
+            );
+        }
+
+        emit LiquidityRemoved(
+            msg.sender,
+            tokenA,
+            tokenB,
+            liquidity,
+            amountA,
+            amountB,
+            recipient
+        );
+    }
+    function removeLiquidityNative(
+        address token,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountNativeMin,
+        uint256 deadline,
+        address recipient
+    ) external nonReentrant beforeDeadline(deadline)
+        returns (uint256 amountToken, uint256 amountNative)
+    {
+        require(token != wrappedNative && liquidity > 0, "BAD_AMOUNT");
+        require(recipient != address(0), "BAD_RECIPIENT");
+
+        address pairAddress = _pair(wrappedNative, token);
+
+        (amountToken, amountNative) = _burnNativeLiquidity(
+            pairAddress,
+            liquidity,
+            amountTokenMin,
+            amountNativeMin
+        );
+
+        _safeTransfer(token, recipient, amountToken);
+        IQMSV3Wrapped(payable(wrappedNative)).withdraw(amountNative);
+
+        (bool ok,) = payable(recipient).call{value: amountNative}("");
+        require(ok, "QMS_SEND_FAILED");
+
+        emit LiquidityRemoved(
+            msg.sender,
+            wrappedNative,
+            token,
+            liquidity,
+            amountNative,
+            amountToken,
+            recipient
+        );
+    }
+
+    function _burnNativeLiquidity(
+        address pairAddress,
+        uint256 liquidity,
+        uint256 amountTokenMin,
+        uint256 amountNativeMin
+    ) internal returns (uint256 amountToken, uint256 amountNative) {
+        QMSwapMultiPairV3 pair = QMSwapMultiPairV3(pairAddress);
+
+        require(
+            pair.transferFrom(msg.sender, pairAddress, liquidity),
+            "LP_TRANSFER_FAILED"
+        );
+
+        if (pair.token0() == wrappedNative) {
+            (amountNative, amountToken) = pair.removeLiquidity(
+                liquidity,
+                amountNativeMin,
+                amountTokenMin,
+                address(this)
+            );
+        } else {
+            (amountToken, amountNative) = pair.removeLiquidity(
+                liquidity,
+                amountTokenMin,
+                amountNativeMin,
+                address(this)
+            );
+        }
+    }
     function swapExactTokensForTokens(
         address tokenIn,
         address tokenOut,
@@ -636,6 +812,15 @@ contract QMSwapMultiRouterV3 {
         require(ok && (data.length == 0 || abi.decode(data, (bool))), "TRANSFER_FROM_FAILED");
     }
 
+    function _safeTransfer(address token, address to, uint256 amount) internal {
+        (bool ok, bytes memory data) = token.call(
+            abi.encodeWithSelector(IQMSV3ERC20.transfer.selector, to, amount)
+        );
+        require(
+            ok && (data.length == 0 || abi.decode(data, (bool))),
+            "TRANSFER_FAILED"
+        );
+    }
     function _safeApprove(address token, address spender, uint256 amount) internal {
         (bool ok, bytes memory data) = token.call(
             abi.encodeWithSelector(IQMSV3ERC20.approve.selector, spender, amount)

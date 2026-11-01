@@ -38,6 +38,26 @@ let activeTab = "transactions";
 let account = "";
 let injectedWallet = null;
 let loading = false;
+let localSwapRows = [];
+
+let walletOverviewState = {
+  status: "idle",
+  wallet: "",
+  totalTransactions: null,
+  contractsInteracted: null,
+  tokenContractsHeld: null,
+  totalGasWei: null,
+  outgoingTransactions: 0,
+  gasFeeRecords: 0,
+  firstActivityMs: null,
+  pagesScanned: 0,
+  scanComplete: false,
+  tokenBalancesLoaded: false,
+  error: ""
+};
+
+let walletOverviewRequestId = 0;
+const WALLET_OVERVIEW_MAX_PAGES = 1000;
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, character => ({
@@ -94,6 +114,962 @@ function formatDate(value) {
   });
 }
 
+
+const LOCAL_SWAP_HISTORY_PREFIX = "qmswap.tradeHistory.v1";
+
+function localSwapStorageKey(wallet = account) {
+  if (!wallet) return "";
+
+  return `${LOCAL_SWAP_HISTORY_PREFIX}:${BigInt(CHAIN_ID).toString()}:${String(wallet).toLowerCase()}`;
+}
+
+function loadLocalSwapHistory() {
+  localSwapRows = [];
+
+  if (!account) return;
+
+  try {
+    const storageKey = localSwapStorageKey(account);
+    const records = JSON.parse(localStorage.getItem(storageKey) || "[]");
+
+    if (!Array.isArray(records)) return;
+
+    const seen = new Set();
+
+    localSwapRows = records
+      .filter(record => {
+        if (!record || typeof record !== "object") return false;
+
+        const hash = String(record.hash || "").toLowerCase();
+
+        if (!/^0x[0-9a-f]{64}$/.test(hash)) return false;
+        if (seen.has(hash)) return false;
+
+        if (String(record.chainId) !== BigInt(CHAIN_ID).toString()) return false;
+        if (String(record.wallet || "").toLowerCase() !== account.toLowerCase()) return false;
+        if (record.receiptVerified !== true) return false;
+
+        seen.add(hash);
+        return true;
+      })
+      .map(record => ({
+        ...record,
+        qmswapLocal: true
+      }))
+      .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+  } catch (error) {
+    console.warn("Local QMSwap history could not be loaded:", error);
+    localSwapRows = [];
+  }
+}
+
+function timestampMs(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+
+  if (typeof value === "number" || /^\d+$/.test(String(value))) {
+    const numeric = Number(value);
+    return numeric < 1000000000000 ? numeric * 1000 : numeric;
+  }
+
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function formatSignedBps(value) {
+  try {
+    const bps = BigInt(value);
+    const negative = bps < 0n;
+    const absolute = negative ? -bps : bps;
+    const percentage = (Number(absolute) / 100).toFixed(2);
+
+    return `${negative ? "-" : bps > 0n ? "+" : ""}${percentage}%`;
+  } catch {
+    return "Unavailable";
+  }
+}
+
+function getActiveRows() {
+  const explorerRows = activeDataset().rows;
+
+  if (activeTab !== "transactions" || !localSwapRows.length) {
+    return explorerRows;
+  }
+
+  const localHashes = new Set(
+    localSwapRows.map(item => String(item.hash).toLowerCase())
+  );
+
+  const uniqueExplorerRows = explorerRows.filter(item =>
+    !localHashes.has(String(itemHash(item)).toLowerCase())
+  );
+
+  return [...localSwapRows, ...uniqueExplorerRows].sort(
+    (a, b) => timestampMs(b.timestamp) - timestampMs(a.timestamp)
+  );
+}
+
+
+const QWAP_ROUTER_HISTORY_ADDRESS =
+  "0x93AFF45f28e5DF1b55f5AEFEfB807De843b12619";
+
+function decodedParameter(transaction, parameterName) {
+  const parameters = transaction.decoded_input?.parameters;
+
+  if (!Array.isArray(parameters)) return null;
+
+  const found = parameters.find(
+    parameter => parameter.name === parameterName
+  );
+
+  return found ? found.value : null;
+}
+
+function transferTokenAddress(transfer) {
+  return String(
+    transfer?.token?.address_hash ||
+    transfer?.token?.address ||
+    ""
+  ).toLowerCase();
+}
+
+function transferWalletAddress(value) {
+  return String(entityAddress(value) || "").toLowerCase();
+}
+
+function safeTokenDecimals(value) {
+  const decimals = Number(value ?? 18);
+
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+    throw new Error("Explorer returned invalid token decimals.");
+  }
+
+  return decimals;
+}
+
+async function importHistoricalSwap() {
+  if (!account) {
+    setStatus("Connect your wallet before importing a historical swap.", "warn");
+    return;
+  }
+
+  if (!injectedWallet) {
+    setStatus("Wallet provider is unavailable.", "error");
+    return;
+  }
+
+  const button = $("importSwapBtn");
+  const input = $("importSwapHash");
+
+  const hash = String(input.value || "").trim();
+
+  if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    setStatus("Enter a valid 32-byte transaction hash.", "warn");
+    return;
+  }
+
+  if (button) button.disabled = true;
+
+  try {
+    const chainId = await injectedWallet.request({
+      method: "eth_chainId"
+    });
+
+    if (String(chainId).toLowerCase() !== CHAIN_ID.toLowerCase()) {
+      throw new Error("Switch your wallet to QMS Testnet before importing.");
+    }
+
+    const storageKey = localSwapStorageKey(account);
+
+    if (!storageKey) {
+      throw new Error("Could not identify the selected wallet.");
+    }
+
+    const response = await fetch(
+      `${API_BASE}/transactions/${encodeURIComponent(hash)}`,
+      {
+        method: "GET",
+        headers: { "Accept": "application/json" },
+        cache: "no-store"
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`QMSScan returned HTTP ${response.status}.`);
+    }
+
+    const payload = await response.json();
+
+    const transaction =
+      payload.transaction ||
+      (payload.result && payload.result.hash ? payload.result : payload);
+
+    if (
+      !transaction ||
+      String(transaction.hash || "").toLowerCase() !== hash.toLowerCase()
+    ) {
+      throw new Error("Explorer response does not match the requested transaction hash.");
+    }
+
+    const sender = transferWalletAddress(transaction.from);
+    const recipient = String(account).toLowerCase();
+    const router = transferWalletAddress(transaction.to);
+
+    if (sender !== recipient) {
+      throw new Error("This transaction does not belong to the connected wallet.");
+    }
+
+    if (router !== QWAP_ROUTER_HISTORY_ADDRESS.toLowerCase()) {
+      throw new Error("This transaction was not sent to the configured QWAP Router.");
+    }
+
+    const method = String(
+      transaction.method ||
+      transaction.decoded_input?.method_call ||
+      ""
+    ).toLowerCase();
+
+    if (!method.includes("swapexacttokensfortokens")) {
+      throw new Error(
+        "This importer currently supports historical ERC20-to-ERC20 QWAP swaps only."
+      );
+    }
+
+    const statusValue = String(
+      transaction.status || transaction.result || ""
+    ).toLowerCase();
+
+    if (!["ok", "success", "confirmed"].includes(statusValue)) {
+      throw new Error("The historical transaction is not confirmed successfully.");
+    }
+
+    if (!transaction.block_number) {
+      throw new Error("Confirmed block information is missing.");
+    }
+
+    const path = decodedParameter(transaction, "path");
+    const inputAmount = decodedParameter(transaction, "amountIn");
+    const minimumOutput = decodedParameter(transaction, "amountOutMin");
+
+    if (
+      !Array.isArray(path) ||
+      path.length < 2 ||
+      !ethers.isAddress(path[0]) ||
+      !ethers.isAddress(path[path.length - 1])
+    ) {
+      throw new Error("Explorer did not provide a valid swap token path.");
+    }
+
+    if (inputAmount === null || minimumOutput === null) {
+      throw new Error("Explorer did not provide the decoded swap amounts.");
+    }
+
+    const inputTokenAddress = String(path[0]).toLowerCase();
+    const outputTokenAddress = String(path[path.length - 1]).toLowerCase();
+
+    const transfers = Array.isArray(transaction.token_transfers)
+      ? transaction.token_transfers
+      : [];
+
+    const inputTransfer = transfers.find(transfer =>
+      transferTokenAddress(transfer) === inputTokenAddress &&
+      transferWalletAddress(transfer.from) === recipient
+    );
+
+    if (!inputTransfer) {
+      throw new Error("The input token transfer was not found in explorer logs.");
+    }
+
+    const outputTransfers = transfers.filter(transfer =>
+      transferTokenAddress(transfer) === outputTokenAddress &&
+      transferWalletAddress(transfer.to) === recipient
+    );
+
+    if (!outputTransfers.length) {
+      throw new Error("The actual output token transfer to this wallet was not found.");
+    }
+
+    const inputToken = inputTransfer.token || {};
+    const outputToken = outputTransfers[0].token || {};
+
+    const inputDecimals = safeTokenDecimals(
+      inputTransfer.total?.decimals ?? inputToken.decimals
+    );
+
+    const outputDecimals = safeTokenDecimals(
+      outputTransfers[0].total?.decimals ?? outputToken.decimals
+    );
+
+    let actualReceivedRaw = 0n;
+
+    for (const transfer of outputTransfers) {
+      actualReceivedRaw += BigInt(
+        transfer.total?.value ?? transfer.amount ?? "0"
+      );
+    }
+
+    if (actualReceivedRaw <= 0n) {
+      throw new Error("Actual output transfer amount is zero or unavailable.");
+    }
+
+    const amountInRaw = BigInt(inputAmount);
+
+    if (amountInRaw <= 0n) {
+      throw new Error("Decoded input amount is invalid.");
+    }
+
+    let actualGasFeeWei = null;
+
+    if (
+      transaction.fee &&
+      transaction.fee.value !== null &&
+      transaction.fee.value !== undefined
+    ) {
+      actualGasFeeWei = BigInt(transaction.fee.value);
+    } else if (
+      transaction.gas_used !== null &&
+      transaction.gas_used !== undefined &&
+      transaction.gas_price !== null &&
+      transaction.gas_price !== undefined
+    ) {
+      actualGasFeeWei =
+        BigInt(transaction.gas_used) *
+        BigInt(transaction.gas_price);
+    }
+
+    const record = {
+      schemaVersion: 1,
+      chainId: BigInt(CHAIN_ID).toString(),
+      wallet: recipient,
+      hash: hash.toLowerCase(),
+      status: "success",
+      fromKey: String(inputToken.symbol || "TOKEN"),
+      toKey: String(outputToken.symbol || "TOKEN"),
+      fromSymbol: String(inputToken.symbol || "TOKEN"),
+      outputSymbol: String(outputToken.symbol || "TOKEN"),
+      inputDecimals,
+      outputDecimals,
+      amountInRaw: String(amountInRaw),
+      expectedAmountOutRaw: null,
+      minimumReceivedRaw: String(BigInt(minimumOutput)),
+      actualReceivedRaw: String(actualReceivedRaw),
+      actualOutputVerified: true,
+      actualGasFeeWei:
+        actualGasFeeWei !== null ? String(actualGasFeeWei) : null,
+      estimatedGasWei: "0",
+      actualOutputDeviationBps: null,
+      gasEstimateDifferenceBps: null,
+      blockNumber: String(transaction.block_number),
+      timestamp: transaction.timestamp || "",
+      timestampSource: "qmscan-transaction-details",
+      venue: "QWAP",
+      receiptVerified: true,
+      verificationSource: "qmscan-transaction-details"
+    };
+
+    let existing = [];
+
+    try {
+      existing = JSON.parse(localStorage.getItem(storageKey) || "[]");
+
+      if (!Array.isArray(existing)) existing = [];
+    } catch {
+      existing = [];
+    }
+
+    const existingIndex = existing.findIndex(item =>
+      String(item.hash || "").toLowerCase() === hash.toLowerCase()
+    );
+
+    if (existingIndex >= 0) {
+      existing[existingIndex] = {
+        ...existing[existingIndex],
+        ...record
+      };
+    } else {
+      existing.unshift(record);
+    }
+
+    existing.sort((a, b) => {
+      const dateA = timestampMs(a.timestamp) || 0;
+      const dateB = timestampMs(b.timestamp) || 0;
+      return dateB - dateA;
+    });
+
+    existing = existing.slice(0, 500);
+
+    localStorage.setItem(storageKey, JSON.stringify(existing));
+
+    loadLocalSwapHistory();
+    render();
+
+    input.value = "";
+
+    setStatus(
+      "Historical QWAP swap imported and verified from QMSScan transaction details. Existing transaction hashes are not duplicated.",
+      "success"
+    );
+  } catch (error) {
+    console.error("Historical swap import failed:", error);
+    setStatus(
+      `Historical swap import failed: ${error?.message || String(error)}`,
+      "error"
+    );
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+function walletTimestampMs(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number" || /^\d+$/.test(String(value))) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric < 1000000000000 ? numeric * 1000 : numeric;
+  }
+
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatQmsWei(value) {
+  try {
+    const raw = BigInt(value);
+    const negative = raw < 0n;
+    const amount = negative ? -raw : raw;
+
+    // Round to four decimal places without floating-point arithmetic.
+    const divisor = 10n ** 14n;
+    const rounded = (amount + divisor / 2n) / divisor;
+
+    // Preserve visibility of very small non-zero fees.
+    if (amount > 0n && rounded === 0n) {
+      return negative ? ">-0.0001" : "<0.0001";
+    }
+
+    const whole = (rounded / 10000n)
+      .toString()
+      .replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+    const fraction = (rounded % 10000n)
+      .toString()
+      .padStart(4, "0")
+      .replace(/0+$/, "");
+
+    return `${negative ? "-" : ""}${whole}${fraction ? "." + fraction : ""}`;
+  } catch {
+    return "Unavailable";
+  }
+}
+
+function updateWalletOverviewCard(id, value, noteId, note) {
+  const element = $(id);
+  const noteElement = $(noteId);
+
+  if (element) element.textContent = value;
+  if (noteElement) noteElement.textContent = note;
+}
+
+async function fetchWalletApiJson(url) {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { "Accept": "application/json" },
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    throw new Error(`QMSScan returned HTTP ${response.status}.`);
+  }
+
+  return response.json();
+}
+
+async function scanWalletTransactions(wallet, requestId) {
+  const contractSet = new Set();
+  const transactionSet = new Set();
+
+  let totalGasWei = 0n;
+  let outgoingTransactions = 0;
+  let gasFeeRecords = 0;
+  let firstActivityMs = null;
+  let pageCount = 0;
+  let next = null;
+  let complete = false;
+
+  const walletLower = wallet.toLowerCase();
+
+  const baseUrl =
+    `${API_BASE}/addresses/${encodeURIComponent(wallet)}/transactions`;
+
+  while (pageCount < WALLET_OVERVIEW_MAX_PAGES) {
+    if (requestId !== walletOverviewRequestId) return null;
+
+    const params = new URLSearchParams();
+
+    if (next) {
+      for (const [key, value] of Object.entries(next)) {
+        if (value !== null && value !== undefined) {
+          params.set(key, String(value));
+        }
+      }
+    } else {
+      params.set("items_count", "50");
+    }
+
+    const page = await fetchWalletApiJson(
+      `${baseUrl}?${params.toString()}`
+    );
+
+    if (!Array.isArray(page.items)) {
+      throw new Error("QMSScan returned an invalid transaction page.");
+    }
+
+    pageCount++;
+
+    for (const tx of page.items) {
+      const hash = String(itemHash(tx) || "").toLowerCase();
+
+      if (hash && transactionSet.has(hash)) continue;
+      if (hash) transactionSet.add(hash);
+
+      const timestamp = walletTimestampMs(tx.timestamp);
+
+      if (
+        timestamp !== null &&
+        (firstActivityMs === null || timestamp < firstActivityMs)
+      ) {
+        firstActivityMs = timestamp;
+      }
+
+      const sender = entityAddress(tx.from).toLowerCase();
+
+      if (sender !== walletLower) continue;
+
+      outgoingTransactions++;
+
+      let feeWei = null;
+
+      try {
+        if (
+          tx.fee &&
+          typeof tx.fee === "object" &&
+          tx.fee.value !== undefined
+        ) {
+          feeWei = BigInt(tx.fee.value);
+        } else if (
+          tx.fee !== null &&
+          tx.fee !== undefined &&
+          typeof tx.fee !== "object"
+        ) {
+          feeWei = BigInt(tx.fee);
+        } else if (
+          tx.gas_used !== null &&
+          tx.gas_used !== undefined &&
+          tx.gas_price !== null &&
+          tx.gas_price !== undefined
+        ) {
+          feeWei =
+            BigInt(tx.gas_used) * BigInt(tx.gas_price);
+        }
+      } catch {
+        feeWei = null;
+      }
+
+      if (feeWei !== null && feeWei >= 0n) {
+        totalGasWei += feeWei;
+        gasFeeRecords++;
+      }
+
+      const target = tx.to || {};
+      const targetAddress = entityAddress(target);
+
+      if (
+        targetAddress &&
+        (
+          target.is_contract === true ||
+          String(target.is_contract).toLowerCase() === "true"
+        )
+      ) {
+        contractSet.add(targetAddress.toLowerCase());
+      }
+
+      const createdAddress = entityAddress(tx.created_contract);
+
+      if (createdAddress) {
+        contractSet.add(createdAddress.toLowerCase());
+      }
+    }
+
+    next = page.next_page_params || null;
+
+    if (
+      !next ||
+      typeof next !== "object" ||
+      Object.keys(next).length === 0
+    ) {
+      complete = true;
+      break;
+    }
+  }
+
+  return {
+    totalTransactionsScanned: transactionSet.size,
+    contractsInteracted: contractSet.size,
+    totalGasWei,
+    outgoingTransactions,
+    gasFeeRecords,
+    firstActivityMs,
+    pagesScanned: pageCount,
+    complete
+  };
+}
+
+async function loadWalletOverview(force = false) {
+  if (!account) return;
+
+  const wallet = account.toLowerCase();
+
+  if (
+    !force &&
+    walletOverviewState.wallet === wallet &&
+    walletOverviewState.status !== "idle"
+  ) {
+    return;
+  }
+
+  const requestId = ++walletOverviewRequestId;
+
+  walletOverviewState = {
+    status: "loading",
+    wallet,
+    totalTransactions: null,
+    contractsInteracted: null,
+    tokenContractsHeld: null,
+    totalGasWei: null,
+    outgoingTransactions: 0,
+    gasFeeRecords: 0,
+    firstActivityMs: null,
+    pagesScanned: 0,
+    scanComplete: false,
+    tokenBalancesLoaded: false,
+    error: ""
+  };
+
+  renderTradeAnalytics();
+
+  const baseUrl =
+    `${API_BASE}/addresses/${encodeURIComponent(wallet)}`;
+
+  const [counterResult, balanceResult, scanResult] =
+    await Promise.allSettled([
+      fetchWalletApiJson(`${baseUrl}/counters`),
+      fetchWalletApiJson(`${baseUrl}/token-balances`),
+      scanWalletTransactions(wallet, requestId)
+    ]);
+
+  if (requestId !== walletOverviewRequestId) return;
+
+  const result = {
+    status: "partial",
+    wallet,
+    totalTransactions: null,
+    contractsInteracted: null,
+    tokenContractsHeld: null,
+    totalGasWei: null,
+    outgoingTransactions: 0,
+    gasFeeRecords: 0,
+    firstActivityMs: null,
+    pagesScanned: 0,
+    scanComplete: false,
+    tokenBalancesLoaded: false,
+    error: ""
+  };
+
+  if (counterResult.status === "fulfilled") {
+    const counters = counterResult.value;
+
+    const count =
+      counters.transactions_count ??
+      counters.transaction_count ??
+      counters.transactionsCount;
+
+    if (
+      count !== null &&
+      count !== undefined &&
+      /^\d+$/.test(String(count))
+    ) {
+      result.totalTransactions = String(count);
+    }
+  } else {
+    result.error = counterResult.reason?.message || "Address counter unavailable.";
+  }
+
+  if (balanceResult.status === "fulfilled") {
+    const payload = balanceResult.value;
+
+    const balances = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.items)
+        ? payload.items
+        : null;
+
+    if (balances) {
+      const tokenAddresses = new Set();
+
+      for (const item of balances) {
+        const token = item.token || {};
+
+        if (
+          token.type &&
+          String(token.type).toUpperCase() !== "ERC-20"
+        ) {
+          continue;
+        }
+
+        const address = String(
+          token.address_hash || token.address || ""
+        ).toLowerCase();
+
+        if (!/^0x[0-9a-f]{40}$/.test(address)) continue;
+
+        try {
+          if (BigInt(item.value ?? "0") > 0n) {
+            tokenAddresses.add(address);
+          }
+        } catch {}
+      }
+
+      result.tokenContractsHeld = tokenAddresses.size;
+      result.tokenBalancesLoaded = true;
+    }
+  } else {
+    result.error = balanceResult.reason?.message || result.error;
+  }
+
+  if (scanResult.status === "fulfilled" && scanResult.value) {
+    const scan = scanResult.value;
+
+    result.contractsInteracted = scan.complete
+      ? scan.contractsInteracted
+      : null;
+
+    result.totalGasWei =
+      scan.complete && scan.gasFeeRecords === scan.outgoingTransactions
+        ? scan.totalGasWei.toString()
+        : null;
+
+    result.outgoingTransactions = scan.outgoingTransactions;
+    result.gasFeeRecords = scan.gasFeeRecords;
+    result.firstActivityMs = scan.firstActivityMs;
+    result.pagesScanned = scan.pagesScanned;
+    result.scanComplete = scan.complete;
+  } else if (scanResult.status === "rejected") {
+    result.error = scanResult.reason?.message || result.error;
+  }
+
+  result.status =
+    result.scanComplete &&
+    result.tokenBalancesLoaded &&
+    result.totalTransactions !== null
+      ? "complete"
+      : "partial";
+
+  walletOverviewState = result;
+
+  renderTradeAnalytics();
+}
+function renderTradeAnalytics() {
+  const panel = $("tradeAnalytics");
+  if (!panel) return;
+
+  panel.hidden = !account;
+
+  if (!account) return;
+
+  const wallet = account.toLowerCase();
+
+  if (
+    walletOverviewState.wallet !== wallet ||
+    walletOverviewState.status === "idle"
+  ) {
+    void loadWalletOverview();
+    return;
+  }
+
+  const data = walletOverviewState;
+
+  if (data.status === "loading") {
+    updateWalletOverviewCard(
+      "statTotalTransactions", "Loading...",
+      "statTransactionNote", "Reading QMSScan address counters"
+    );
+
+    updateWalletOverviewCard(
+      "statContractsInteracted", "Loading...",
+      "statContractsNote", "Scanning contract interactions"
+    );
+
+    updateWalletOverviewCard(
+      "statTokenContractsHeld", "Loading...",
+      "statTokenContractsNote", "Reading positive token balances"
+    );
+
+    updateWalletOverviewCard(
+      "statGasSpent", "Loading...",
+      "statGasNote", "Summing outgoing transaction fees"
+    );
+
+    updateWalletOverviewCard(
+      "statWalletAge", "Loading...",
+      "statWalletAgeNote", "Finding first on-chain activity"
+    );
+
+    return;
+  }
+
+  updateWalletOverviewCard(
+    "statTotalTransactions",
+    data.totalTransactions !== null
+      ? BigInt(data.totalTransactions).toLocaleString()
+      : "Unavailable",
+    "statTransactionNote",
+    data.totalTransactions !== null
+      ? "QMSScan address transaction counter"
+      : "Address counter unavailable"
+  );
+
+  updateWalletOverviewCard(
+    "statContractsInteracted",
+    data.contractsInteracted !== null
+      ? data.contractsInteracted.toLocaleString()
+      : "Incomplete",
+    "statContractsNote",
+    data.scanComplete
+      ? "Unique contract addresses called or created"
+      : "Full transaction scan not completed"
+  );
+
+  updateWalletOverviewCard(
+    "statTokenContractsHeld",
+    data.tokenContractsHeld !== null
+      ? data.tokenContractsHeld.toLocaleString()
+      : "Unavailable",
+    "statTokenContractsNote",
+    data.tokenBalancesLoaded
+      ? "ERC-20 contracts with positive balances"
+      : "Token balance data unavailable"
+  );
+
+  let gasValue = "Unavailable";
+  let gasNote = "Actual outgoing transaction fees";
+
+  if (data.totalGasWei !== null) {
+    gasValue = `${formatQmsWei(data.totalGasWei)} QMS`;
+    gasNote =
+      `Fees verified for ${data.gasFeeRecords.toLocaleString()} / ` +
+      `${data.outgoingTransactions.toLocaleString()} outgoing transactions`;
+  } else if (data.scanComplete) {
+    gasValue = "Incomplete";
+    gasNote =
+      `Fee data incomplete: ${data.gasFeeRecords.toLocaleString()} / ` +
+      `${data.outgoingTransactions.toLocaleString()} outgoing transactions`;
+  } else {
+    gasNote = "Full transaction scan not completed";
+  }
+
+  updateWalletOverviewCard(
+    "statGasSpent",
+    gasValue,
+    "statGasNote",
+    gasNote
+  );
+
+  let ageValue = "Unavailable";
+  let ageNote = "First transaction date unavailable";
+
+  if (data.scanComplete && data.firstActivityMs !== null) {
+    const firstDate = new Date(data.firstActivityMs);
+
+    const ageDays = Math.max(
+      0,
+      Math.floor((Date.now() - data.firstActivityMs) / 86400000)
+    );
+
+    ageValue = ageDays === 1
+      ? "1 day"
+      : `${ageDays.toLocaleString()} days`;
+
+    ageNote = "First activity: " +
+      firstDate.toLocaleDateString();
+  }
+
+  updateWalletOverviewCard(
+    "statWalletAge",
+    ageValue,
+    "statWalletAgeNote",
+    ageNote
+  );
+}
+
+function renderLocalSwapRow(item) {
+  const status = statusFor(item, "transactions");
+
+  const statusClass = status === "Success"
+    ? "success"
+    : status === "Failed"
+      ? "failed"
+      : "pending";
+
+  const block = item.blockNumber ?? "—";
+
+  const safeBlock = /^\d+$/.test(String(block))
+    ? `<a class="address-link" href="${EXPLORER}/block/${encodeURIComponent(block)}" target="_blank" rel="noopener noreferrer">#${esc(block)}</a>`
+    : "—";
+
+  const hash = String(item.hash || "");
+
+  const txLink = /^0x[0-9a-fA-F]{64}$/.test(hash)
+    ? `<a class="tx-link hash" href="${EXPLORER}/tx/${encodeURIComponent(hash)}" target="_blank" rel="noopener noreferrer">${esc(shorten(hash))} ↗</a>`
+    : '<span class="muted">Unavailable</span>';
+
+  const actualOutput = item.actualReceivedRaw !== null
+    ? `${formatRaw(item.actualReceivedRaw, Number(item.outputDecimals || 18), 8)} ${esc(item.outputSymbol || item.toKey)}`
+    : "Not verified";
+
+  const inputAmount =
+    `${formatRaw(item.amountInRaw, Number(item.inputDecimals || 18), 8)} ${esc(item.fromSymbol || item.fromKey)}`;
+
+  const gasFee = item.actualGasFeeWei !== null
+    ? `${formatRaw(item.actualGasFeeWei, 18, 18)} QMS`
+    : "Unavailable";
+
+  const deviation = item.actualOutputDeviationBps !== null
+    ? formatSignedBps(item.actualOutputDeviationBps)
+    : "Unavailable";
+
+  return `
+    <tr>
+      <td>
+        <div>${esc(formatDate(item.timestamp))}</div>
+        <div class="sub-label">Block ${safeBlock}</div>
+      </td>
+      <td>
+        <div class="main-label">Swap · ${esc(item.fromSymbol || item.fromKey)} → ${esc(item.outputSymbol || item.toKey)}</div>
+        <div class="sub-label">QMSwap verified receipt · ${esc(item.venue || "QWAP")}</div>
+      </td>
+      <td>
+        <div class="main-label">${actualOutput}</div>
+        <div class="sub-label">Input: ${inputAmount} · Gas: ${gasFee} · Δ ${esc(deviation)}</div>
+      </td>
+      <td>
+        <div>${explorerAddress(item.wallet)}</div>
+        <div class="sub-label">QMSwap transaction</div>
+      </td>
+      <td><span class="badge ${statusClass}">${esc(status)}</span></td>
+      <td>${txLink}</td>
+    </tr>`;
+}
 function setStatus(message, tone = "") {
   $("status").textContent = message;
   $("status").dataset.tone = tone;
@@ -128,6 +1104,12 @@ function updateWalletUI() {
 }
 
 function statusFor(item, type) {
+  if (item.qmswapLocal) {
+    return item.status === "success" ? "Success"
+      : item.status === "failed" ? "Failed"
+      : "Pending";
+  }
+
   if (type === "token-transfers") return "Success";
 
   const values = [
@@ -165,6 +1147,8 @@ function statusFor(item, type) {
 }
 
 function directionFor(item) {
+  if (item.qmswapLocal) return "Sent";
+
   const from = entityAddress(item.from).toLowerCase();
   const to = entityAddress(item.to).toLowerCase();
   const wallet = account.toLowerCase();
@@ -180,6 +1164,10 @@ function itemHash(item) {
 }
 
 function methodName(item, type) {
+  if (item.qmswapLocal) {
+    return `Swap ${item.fromSymbol || item.fromKey} → ${item.outputSymbol || item.toKey}`;
+  }
+
   if (item.method && typeof item.method === "object") {
     return item.method.name || item.method.method_name || "Contract Call";
   }
@@ -201,6 +1189,24 @@ function methodName(item, type) {
 }
 
 function amountDetails(item, type) {
+  if (item.qmswapLocal) {
+    const actual = item.actualReceivedRaw !== null
+      ? `${formatRaw(item.actualReceivedRaw, Number(item.outputDecimals || 18), 8)} ${item.outputSymbol || item.toKey}`
+      : "Not verified";
+
+    const input =
+      `${formatRaw(item.amountInRaw, Number(item.inputDecimals || 18), 8)} ${item.fromSymbol || item.fromKey}`;
+
+    const fee = item.actualGasFeeWei !== null
+      ? `${formatRaw(item.actualGasFeeWei, 18, 18)} QMS`
+      : "Unavailable";
+
+    return {
+      main: actual,
+      sub: `Input: ${input} · Gas: ${fee}`
+    };
+  }
+
   if (type === "token-transfers") {
     const token = item.token || {};
     const total = item.total || {};
@@ -245,6 +1251,8 @@ function explorerAddress(value) {
 }
 
 function renderRow(item, type) {
+  if (item.qmswapLocal) return renderLocalSwapRow(item);
+
   const hash = itemHash(item);
   const status = statusFor(item, type);
   const direction = directionFor(item);
@@ -308,6 +1316,16 @@ function applyFilters(items) {
     if (statusFilter === "failed" && status !== "failed") return false;
     if (statusFilter === "pending" && status !== "pending") return false;
 
+    const timeRange = Number($("timeFilter")?.value || 0);
+
+    if (timeRange > 0) {
+      const itemTime = timestampMs(item.timestamp);
+
+      if (Number.isFinite(itemTime) && itemTime < Date.now() - timeRange) {
+        return false;
+      }
+    }
+
     const token = item.token || {};
     const text = [
       itemHash(item),
@@ -319,7 +1337,12 @@ function applyFilters(items) {
       token.address,
       item.block_number,
       item.value,
-      item.type
+      item.type,
+      item.fromSymbol,
+      item.outputSymbol,
+      item.fromKey,
+      item.toKey,
+      item.venue
     ].join(" ").toLowerCase();
 
     return !query || text.includes(query);
@@ -328,11 +1351,14 @@ function applyFilters(items) {
 
 function render() {
   const dataset = activeDataset();
-  const visible = applyFilters(dataset.rows);
+  const allRows = getActiveRows();
+  const visible = applyFilters(allRows);
+
+  renderTradeAnalytics();
 
   $("sectionTitle").textContent = dataset.title;
   $("resultCount").textContent =
-    `${visible.length} shown · ${dataset.rows.length} loaded`;
+    `${visible.length} shown · ${allRows.length} loaded`;
   $("pageInfo").textContent = `Loaded ${dataset.page} page(s)`;
 
   $("statusFilter").hidden = activeTab !== "transactions";
@@ -351,6 +1377,8 @@ function render() {
 
 async function fetchPage(loadMore = false) {
   if (!account || loading) return;
+
+  loadLocalSwapHistory();
 
   const dataset = activeDataset();
 
@@ -622,13 +1650,29 @@ document.querySelectorAll("[data-tab]").forEach(button => {
 
 $("connectBtn").addEventListener("click", connectWallet);
 $("switchBtn").addEventListener("click", switchNetwork);
-$("refreshBtn").addEventListener("click", () => fetchPage(false));
+$("refreshBtn").addEventListener("click", () => {
+  walletOverviewState = {
+    status: "idle",
+    wallet: ""
+  };
+
+  return fetchPage(false);
+});
 $("loadMoreBtn").addEventListener("click", () => fetchPage(true));
 $("exportBtn").addEventListener("click", downloadCsv);
 $("searchInput").addEventListener("input", render);
 $("directionFilter").addEventListener("change", render);
 $("statusFilter").addEventListener("change", render);
 
+
+window.addEventListener("storage", event => {
+  if (!account || !event.key) return;
+
+  if (event.key === localSwapStorageKey(account)) {
+    loadLocalSwapHistory();
+    render();
+  }
+});
 async function boot() {
   render();
 

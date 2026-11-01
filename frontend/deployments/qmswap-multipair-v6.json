@@ -16,35 +16,35 @@
       "native": true
     },
     "USDT": {
-      "address": "0xb04d806cfA92fE57A06737f2191609A61351FeF8",
+      "address": "0x7876e25567728016418FB9C8ebBE5962B3a10A0A",
       "symbol": "USDT",
       "decimals": 6,
       "displayName": "USDT",
       "native": false
     },
     "USDC": {
-      "address": "0xCBcb88728179c59CDCeee389431e1DFC198854b6",
+      "address": "0xEb656aBd3B96c4191A4F170777Def9e572D39c32",
       "symbol": "USDC",
       "decimals": 6,
       "displayName": "USDC",
       "native": false
     },
     "ETH": {
-      "address": "0x2dd02c31E7dAF8a4565341EFa6e0E25c438B2993",
+      "address": "0x73Cd1AD20A28826491E9eAd5Dcc330A752b7788a",
       "symbol": "WETH",
       "decimals": 18,
       "displayName": "ETH",
       "native": false
     },
     "BTC": {
-      "address": "0xE94a95800B289079ff5ae669A26D3b76D950E3b9",
+      "address": "0x137bd2ABc12516f03358Cfc0F92FF83DB5E00Afa",
       "symbol": "WBTC",
       "decimals": 8,
       "displayName": "BTC",
       "native": false
     },
     "BNB": {
-      "address": "0xEbFEb41c0096Da089A84191e6D75CB93Ef78a356",
+      "address": "0x2dC6fc973737f3934DdA77cFcd643d82CF91d508",
       "symbol": "WBNB",
       "decimals": 18,
       "displayName": "BNB",
@@ -52,21 +52,21 @@
     }
   },
   "pairs": {
-    "QMS/USDT": "0xE68f38EDaf332d4020a6d27c070281A714318926",
-    "QMS/USDC": "0xE4a3AeF925c4d2Efb42E4EF647518fD24FBe0D0F",
-    "QMS/ETH": "0x32f322a8a3D196d16D981094Ca68e6197C4811Fc",
-    "QMS/BTC": "0x044FedD0CDe0339f000C8759ee63eAd71F267F9f",
-    "QMS/BNB": "0xC393cCdA7bE8957BC05C79493F989a3e7506C77c",
-    "USDT/USDC": "0xA19c521D81443E719c746E7EDaEEb2BC9beea628",
-    "USDT/ETH": "0xe9F442221A78675553c1Ff76e7b75aC2B7E1c398",
-    "USDT/BTC": "0x0bE288299f86f3E98DD2B2400ACE600583845cb6",
-    "USDT/BNB": "0x0Ff16FCBe7A7C7aCFa03435dd7DB8E236c66961f",
-    "USDC/ETH": "0x4424BedA8d093B52F9CEA1466EE57b3Dbe66a329",
-    "USDC/BTC": "0x62A00C93e414B0Cb46410Ed5192b11b56cbb67c8",
-    "USDC/BNB": "0x5b60E08Fd3535105bc06a7Cc03f6383cD7c5a1Cf",
-    "ETH/BTC": "0x9A94bB32D7053F9Bd47080E405d3F4ddE8B45353",
-    "ETH/BNB": "0x776955DE8dD6137e73B519E5b4E99B814D06892F",
-    "BTC/BNB": "0x5d76603C047Bd2cdECB71e0FF540d7AC63F218FC"
+    "QMS/USDT": "0x5Bad5A224DafB8B13c107bb875531A869Cff1257",
+    "QMS/USDC": "0x7C9E28ce225240fD890629db0e03868bd9e03Bf5",
+    "QMS/ETH": "0xbd8396bcAF9c5F1D8f87dC1Bba280e89B23657B2",
+    "QMS/BTC": "0xb7e9ef48d19e25023aEEAf62c47F87b935247195",
+    "QMS/BNB": "0x76567a663eE8c9Caf6cfA67ca948521e2D88B036",
+    "USDT/USDC": "0x4f13813D651b962a1C21EE7bd8D10fA35bcE2c63",
+    "USDT/ETH": "0x81f24aE4901c9A3017A60da52E175971b0D49D8F",
+    "USDT/BTC": "0x94c2c79213184E464447313a20BF4F9C07f526B8",
+    "USDT/BNB": "0x0865F61e9f0C8aBf156009aec13DB88f402ebcd6",
+    "USDC/ETH": "0xAA4A82b7939dDb00687F0843b19A4CF95316C81d",
+    "USDC/BTC": "0x93881C2F23B9bAD5DB180Bdb4d55B7fE94e314DD",
+    "USDC/BNB": "0x048C0b5D581c883Ac27Fa1689453E2A8043eE3CB",
+    "ETH/BTC": "0xFE60f9Ff765D2c43ddABd885bC6bD4C8267a7454",
+    "ETH/BNB": "0x331CaC9DD84CF919B40c5aCC7cd95B69a63e3c58",
+    "BTC/BNB": "0x89e9fE0b01c53AeA67eE39E839674D38A4ebc49B"
   },
   "pairCount": 15,
   "adminAllocation": "50% of each mock token's maximum supply",
@@ -76,9 +76,9 @@
     "QMS": "1.0",
     "USDT": "1.0",
     "USDC": "1.0",
-    "ETH": "2350.82",
-    "BTC": "80623.62",
-    "BNB": "714.2"
+    "ETH": "2324.6",
+    "BTC": "80290.0",
+    "BNB": "753.18"
   },
   "liquidityPoolCountSeeded": 15,
   "seedPlan": "500m total ETH/BTC/BNB across USDT and USDC pools; live market reference",
